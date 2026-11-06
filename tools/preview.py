@@ -1,4 +1,4 @@
-"""Local preview of the apps/a3_webnametag.py web page with a mock badge backend.
+"""Local preview of the apps/webnametag.py web page with a mock badge backend.
 Host-side only (tools/ is not synced to the badge). Usage: tools/preview.py [port]
 
 The mock mimics the badge: a submission keeps it "busy" for BUSY_S seconds, during which
@@ -8,7 +8,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-SRC = Path(__file__).resolve().parent.parent / "apps" / "a3_webnametag.py"
+SRC = Path(__file__).resolve().parent.parent / "apps" / "webnametag.py"
 tree = ast.parse(SRC.open().read())
 consts = {}
 for n in tree.body:

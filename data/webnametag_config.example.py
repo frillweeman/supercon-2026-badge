@@ -1,5 +1,5 @@
 """Template for data/webnametag_config.py (which is untracked). Copy it to that name
-and fill in the real values. apps/a3_webnametag.py reads SSID, PASSWORD, HOSTNAME and
+and fill in the real values. apps/webnametag.py reads SSID, PASSWORD, HOSTNAME and
 CONNECT_TIMEOUT_MS from there."""
 
 SSID = "your-network-name"
