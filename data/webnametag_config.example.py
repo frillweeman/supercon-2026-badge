@@ -4,5 +4,5 @@ CONNECT_TIMEOUT_MS from there."""
 
 SSID = "your-network-name"
 PASSWORD = "your-password"
-HOSTNAME = "billboard"  # announced via DHCP/mDNS as <HOSTNAME>.local
+HOSTNAME = "willboard"  # announced via DHCP/mDNS as <HOSTNAME>.local
 CONNECT_TIMEOUT_MS = 20000

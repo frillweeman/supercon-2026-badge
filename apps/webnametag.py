@@ -36,12 +36,12 @@ try:
 
     SSID = _cfg.SSID
     PASSWORD = _cfg.PASSWORD
-    HOSTNAME = getattr(_cfg, "HOSTNAME", "billboard")
+    HOSTNAME = getattr(_cfg, "HOSTNAME", "willboard")
     CONNECT_TIMEOUT_MS = getattr(_cfg, "CONNECT_TIMEOUT_MS", 20000)
 except Exception as _ex:
     print("webnametag: no usable data/webnametag_config.py:", _ex)
     SSID = PASSWORD = None
-    HOSTNAME = "billboard"
+    HOSTNAME = "willboard"
     CONNECT_TIMEOUT_MS = 20000
 # Optional HEIC fallback: only fetched if the browser can't decode a HEIC/HEIF photo itself.
 # Pinned with a Subresource Integrity hash (heic2any 0.0.4, MIT, ~1.3 MB).
@@ -60,8 +60,10 @@ ACTIVE_WINDOW_MS = 1000  # run() executed this recently => the app is on screen
 LED_OFF = (0, 0, 0)
 LED_RED = (3, 0, 0)
 LED_GREEN = (0, 2, 0)
-LED_ORANGE = (3, 1, 0)
-LED_ORANGE_TAIL = (1, 0, 0)
+# Orange needs red:green near 3:1, and (1,0,0) rounds the green away and shows as plain red,
+# so the chase's dim tail is (3,1,0) and the head is twice that.
+LED_ORANGE = (6, 2, 0)
+LED_ORANGE_TAIL = (3, 1, 0)
 CHASE_STEP_MS = 90
 _LED_FILL = {"red": LED_RED, "green": LED_GREEN, "off": LED_OFF}
 _FAILED_STATUSES = ("Failed", "Server failed", "No config")
@@ -71,10 +73,11 @@ _BLACK = lvgl.color_hex(0x000000)
 
 
 def _chase():
-    """LED sequence (see LedBar.set_sequence): an orange pixel sweeping along the bar."""
+    """LED sequence (see LedBar.set_sequence): an all-orange comet sweeping along the bar."""
     i = 0
     while True:
         frame = [LED_OFF] * NUM_LEDS
+        frame[(i - 2) % NUM_LEDS] = LED_ORANGE_TAIL
         frame[(i - 1) % NUM_LEDS] = LED_ORANGE_TAIL
         frame[i % NUM_LEDS] = LED_ORANGE
         yield frame, CHASE_STEP_MS
@@ -114,6 +117,13 @@ input[type=range]{width:100%;accent-color:var(--ac);margin:14px 0 4px}
 .opt{display:flex;align-items:center;gap:10px;margin:12px 0 0}
 .opt input[type=range]{margin:0;flex:1}
 #pv{margin-top:12px}
+#ov{position:fixed;top:0;right:0;bottom:0;left:0;background:rgba(0,0,0,.55);display:none;align-items:center;
+justify-content:center;padding:20px;z-index:9}
+#ov div{background:var(--card);color:var(--fg);border-radius:14px;padding:22px;max-width:360px;width:100%}
+#ov p{margin:0 0 16px;font-size:16px}
+#ov button{width:100%}
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--fg);color:var(--bg);
+padding:10px 16px;border-radius:999px;font-size:14px;display:none;z-index:8;max-width:90%;text-align:center}
 </style></head><body><main>
 <header><i></i><h1>Supercon Badge</h1></header>
 <section><h2>Name</h2><p class=cur id=cur>%NAME%</p>
@@ -126,12 +136,14 @@ input[type=range]{width:100%;accent-color:var(--ac);margin:14px 0 4px}
 <canvas id=c width=480 height=%QH%></canvas>
 <input type=range id=z min=0 max=100 value=0 aria-label=Zoom>
 <p class=hint>Drag to position, slide to zoom. The frame is the area under the badge's status bar.</p>
-<label class=opt><input type=checkbox id=rc> Use red</label>
+<label class=opt><input type=checkbox id=rc checked> Use red</label>
 <label class=opt>Red strength <input type=range id=rs min=0 max=100 value=50></label>
 <canvas id=pv width=960 height=%H%></canvas>
 <p class=hint>Preview of what the badge will show.</p>
 <button id=s>Send to badge</button>
 </div></section></main>
+<div id=ov><div role=alertdialog aria-modal=true><p id=ovt></p><button id=ovb>OK</button></div></div>
+<div id=toast></div>
 <script>
 var W=960,H=%H%,P=W/2,Q=H/2,img,sc,mn,ox,oy,d=null;
 var f=document.getElementById('f'),c=document.getElementById('c'),x=c.getContext('2d'),
@@ -153,7 +165,7 @@ f.onchange=function(){if(!f.files[0])return;m.textContent='Loading...';
  img=b;mn=Math.max(P/b.width,Q/b.height);sc=mn;z.value=0;
  ox=(P-b.width*sc)/2;oy=(Q-b.height*sc)/2;
  document.getElementById('ed').style.display='block';m.textContent='';draw();})
- .catch(function(){m.textContent='Could not read that image.';});};
+ .catch(function(){m.textContent='';alertBox('Could not read that image.');});};
 z.oninput=function(){var cx=(P/2-ox)/sc,cy=(Q/2-oy)/sc;
  sc=mn*(1+3*z.value/100);ox=P/2-cx*sc;oy=Q/2-cy*sc;draw();};
 c.onpointerdown=function(e){d=[e.clientX,e.clientY,ox,oy];c.setPointerCapture(e.pointerId);};
@@ -190,26 +202,35 @@ function crop(){var o=document.createElement('canvas');o.width=W;o.height=H;var 
 function run(){return dither(crop(),rc.checked,Math.pow(2,(50-rs.value)/25));}
 function prev(){clearTimeout(tm);tm=setTimeout(function(){if(img)pvx.putImageData(run().pv,0,0);},250);}
 var sb=document.getElementById('s');
+/* Errors go in a modal (inline text can be scrolled out of view); success is a toast. */
+var ov=document.getElementById('ov'),ovt=document.getElementById('ovt'),tt=document.getElementById('toast'),tk;
+function alertBox(t){ovt.textContent=t;ov.style.display='flex';}
+document.getElementById('ovb').onclick=function(){ov.style.display='none';};
+ov.onclick=function(e){if(e.target===ov)ov.style.display='none';};
+function toast(t){tt.textContent=t;tt.style.display='block';clearTimeout(tk);
+ tk=setTimeout(function(){tt.style.display='none';},4000);}
 /* Put the photo form back to its starting state after a successful upload. */
 function reset(){document.getElementById('ed').style.display='none';f.value='';img=null;
- z.value=0;rc.checked=false;rs.value=50;clearTimeout(tm);pvx.clearRect(0,0,W,H);x.clearRect(0,0,P,Q);}
+ z.value=0;rc.checked=true;rs.value=50;clearTimeout(tm);pvx.clearRect(0,0,W,H);x.clearRect(0,0,P,Q);}
 /* Resolves to [status, text]. The badge answers 503 + a wait message while it is busy. */
 function post(url,body,hdr){return fetch(url,{method:'POST',body:body,headers:hdr||{}})
  .then(function(a){return a.text().then(function(t){return[a.status,t];});});}
 function send(r){m.textContent='Sending...';sb.disabled=true;
  post('/photo',r.red?r.out:r.out.subarray(0,W*H/8),{'Content-Type':'application/octet-stream'})
- .then(function(a){if(a[0]==200){reset();m.textContent='Sent! The panel is refreshing and takes a while.';}
-  else m.textContent=a[1];})
- .catch(function(){m.textContent='Could not reach the badge.';})
+ .then(function(a){m.textContent='';
+  if(a[0]==200){reset();toast('Sent! The panel is refreshing and takes a while.');}
+  else alertBox(a[1]);})
+ .catch(function(){m.textContent='';alertBox('Could not reach the badge.');})
  .then(function(){sb.disabled=false;});}
 rc.onchange=rs.oninput=prev;
 sb.onclick=function(){send(run());};
 var nf=document.getElementById('nf'),nm=document.getElementById('nm'),cur=document.getElementById('cur');
 nf.onsubmit=function(ev){ev.preventDefault();nm.textContent='Sending...';
  post('/',new URLSearchParams({name:document.getElementById('ni').value}))
- .then(function(a){if(a[0]==200){cur.textContent=a[1];nf.reset();nm.textContent='Name sent.';}
-  else nm.textContent=a[1];})
- .catch(function(){nm.textContent='Could not reach the badge.';});};
+ .then(function(a){nm.textContent='';
+  if(a[0]==200){cur.textContent=a[1];nf.reset();document.getElementById('ni').blur();toast('Name sent.');}
+  else alertBox(a[1]);})
+ .catch(function(){nm.textContent='';alertBox('Could not reach the badge.');});};
 </script></body></html>"""
 
 
