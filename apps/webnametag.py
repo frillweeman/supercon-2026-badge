@@ -180,44 +180,61 @@ class WebNametagApp(BaseApp):
 
     # ---- Display -------------------------------------------------------
     def _build_screen(self):
+        # LVGL -> framebuffer conversion (epd._lv_flush) is a pure-Python per-pixel
+        # loop, so repainting the full 960x672 panel takes ages. Keep the screen
+        # transparent over a pre-cleared white framebuffer, and draw text only in
+        # small fixed-size OPAQUE white boxes so stale pixels get covered.
         scr = lvgl.obj()
         scr.remove_style_all()
         scr.set_size(lvgl.pct(100), lvgl.pct(100))
-        scr.set_style_bg_color(_WHITE, 0)
-        scr.set_style_bg_opa(lvgl.OPA.COVER, 0)
+        scr.set_style_bg_opa(lvgl.OPA.TRANSP, 0)
 
-        self._status_lbl = lvgl.label(scr)
-        self._status_lbl.set_style_text_font(lvgl.font_montserrat_24, 0)
-        self._status_lbl.set_style_text_color(_BLACK, 0)
-        self._status_lbl.align(lvgl.ALIGN.TOP_LEFT, 20, 20)
+        def box(w, h, font, color, align, x, y):
+            b = lvgl.obj(scr)
+            b.remove_style_all()
+            b.set_size(w, h)
+            b.set_style_bg_color(_WHITE, 0)
+            b.set_style_bg_opa(lvgl.OPA.COVER, 0)
+            b.align(align, x, y)
+            lbl = lvgl.label(b)
+            lbl.set_style_text_font(font, 0)
+            lbl.set_style_text_color(color, 0)
+            lbl.set_text("")
+            return b, lbl
 
-        self._ip_lbl = lvgl.label(scr)
-        self._ip_lbl.set_style_text_font(lvgl.font_montserrat_24, 0)
-        self._ip_lbl.set_style_text_color(_RED, 0)
-        self._ip_lbl.align(lvgl.ALIGN.TOP_LEFT, 20, 60)
-
-        self._name_lbl = lvgl.label(scr)
-        self._name_lbl.set_style_text_font(lvgl.font_montserrat_48, 0)
-        self._name_lbl.set_style_text_color(_BLACK, 0)
+        self._status_box, self._status_lbl = box(
+            500, 36, lvgl.font_montserrat_24, _BLACK, lvgl.ALIGN.TOP_LEFT, 20, 20)
+        self._ip_box, self._ip_lbl = box(
+            500, 36, lvgl.font_montserrat_24, _RED, lvgl.ALIGN.TOP_LEFT, 20, 60)
+        self._name_box, self._name_lbl = box(
+            900, 70, lvgl.font_montserrat_48, _BLACK, lvgl.ALIGN.CENTER, 0, 0)
         self._name_lbl.align(lvgl.ALIGN.CENTER, 0, 0)
-
-        hint = lvgl.label(scr)
-        hint.set_style_text_font(lvgl.font_montserrat_16, 0)
-        hint.set_style_text_color(_BLACK, 0)
+        self._hint_box, hint = box(
+            300, 24, lvgl.font_montserrat_16, _BLACK, lvgl.ALIGN.BOTTOM_MID, 0, -10)
         hint.set_text("User A/B: WiFi on/off")
-        hint.align(lvgl.ALIGN.BOTTOM_MID, 0, -10)
 
         self._scr = scr
         self._built = True
 
-    def _redraw(self):
-        snap = (self.status, self.ip, self.name_text)
+    def _set_texts(self):
         self._status_lbl.set_text("WiFi: " + self.status)
         self._ip_lbl.set_text(("http://" + self.ip) if self.ip else "")
         self._name_lbl.set_text(self.name_text)
+        self._name_lbl.align(lvgl.ALIGN.CENTER, 0, 0)
+
+    def _redraw(self, full=False):
+        """Render only what changed. full=True redraws all boxes (on entry)."""
+        new =(self.status, self.ip, self.name_text)
+        self._set_texts()
+        if full:
+            self._scr.update_layout()
+            # screen_load queued a full-panel dirty area; drop it, keep only our boxes.
+            display.lv_display.inv_p = 0
+            for b in (self._status_box, self._ip_box, self._name_box, self._hint_box):
+                b.invalidate()
         lvgl.refr_now(display.lv_display)
         display.update()
-        self._drawn = snap
+        self._drawn = new
 
     # ---- App loop ------------------------------------------------------
     def run(self):
@@ -226,10 +243,11 @@ class WebNametagApp(BaseApp):
         if self.launched:
             if not self._built:
                 self._build_screen()
+            display.clear()  # framebuffers to white; LVGL only paints our boxes
             lvgl.screen_load(self._scr)
             if not self._wifi_on:  # first launch, or retry after "Failed"/"WiFi off"
                 self._wifi_enable()
-            self._redraw()
+            self._redraw(full=True)
             return
 
         if UserA.pressed() or UserB.pressed():
