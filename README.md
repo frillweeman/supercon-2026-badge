@@ -49,7 +49,23 @@ Apps are `BaseApp` subclasses in `apps/`. They are discovered automatically at b
 
 This workflow has not been run end-to-end on the badge yet.
 
-## Re-dump / sync
+## Sync to the badge
+
+`tools/sync.py` makes the badge match this directory (create, update, delete), transferring only files whose SHA-256 differs.
+
+```sh
+tools/sync.py                  # dry run: show what would change
+tools/sync.py --apply          # make the changes
+tools/sync.py --apply --reset  # ...and reset the badge afterwards
+tools/sync.py --no-delete      # never delete files that exist only on the badge
+tools/sync.py --port /dev/cu.usbmodemXXXX
+```
+
+- Syncs `main.py`, `boot.py`, `apps/`, `lib/`, `data/`. Skips `data/panel_config.json`, `data/user_apps.py` and `data/app_list`, which the badge rewrites on every boot.
+- Reading the badge interrupts the running app (no reset). Use `--reset` or press the reset button afterwards.
+- Not yet run against real hardware.
+
+## Re-dump (badge -> this repo)
 
 ```sh
 mpremote connect /dev/cu.usbmodem1101 fs cp -r : dump/
