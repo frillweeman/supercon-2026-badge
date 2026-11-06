@@ -30,6 +30,7 @@ See "Open questions" at the bottom before relying on any [inferred] item.
 | `main.py` | Starts 4 asyncio tasks: button scan, display, LED update, app switcher. Prints a 60 s heartbeat with `micropython.mem_info()` (this is what you see on the serial console). |
 | `apps/` | One file per app. Auto-discovered. |
 | `lib/` | Drivers + launcher: `epd.py`, `led_bar.py`, `button.py`, `sao.py`, `board.py`, `app_switcher.py`, `app_list.py`, PNG helpers (`PNGdecoder.py`, `large_png.py`), `zlib.py`, `json_configs.py`. |
+| `tools/` | Host-side scripts, **not synced to the badge**. `sync.py` pushes this dir to the badge (see below). |
 | `data/` | Assets and state: `gallery/` (44 PNGs), `graphics/` (10 PNGs), `schedule.csv`, `rendered_luts.py` (EPD waveform tables), `panel_config.json`, `user_apps.py`, `app_list`. |
 
 Built-in apps: Workshops, Sat Talks, Sun Talks (all from `apps/schedule.py`), Gallery, Nametag.
@@ -52,8 +53,20 @@ Built-in apps: Workshops, Sat Talks, Sun Talks (all from `apps/schedule.py`), Ga
 Untested workflow (the dump was read-only so far):
 
 1. `cp apps/template.py apps/myapp.py`, rename the class, set `self.name`.
-2. `mpremote connect /dev/cu.usbmodem1101 fs cp apps/myapp.py :apps/myapp.py`
-3. `mpremote connect /dev/cu.usbmodem1101 reset`, then watch the console for `Added app: <name>`.
+2. `tools/sync.py` (dry run), then `tools/sync.py --apply --reset`. Or copy one file by hand:
+   `mpremote connect /dev/cu.usbmodem1101 fs cp apps/myapp.py :apps/myapp.py` then `... reset`.
+3. Watch the console for `Added app: <name>`.
+
+### `tools/sync.py` (local dir -> badge)
+
+Creates, updates and deletes files on the badge so it matches this directory. Compares SHA-256 per file and only transfers differences. **Dry run by default**; `--apply` writes, `--no-delete` keeps remote-only files, `--reset` resets the badge afterwards, `--port` overrides `/dev/cu.usbmodem1101`.
+
+- Scope: `main.py`, `boot.py`, `apps/`, `lib/`, `data/` only. Other badge files and local `CLAUDE.md`/`tools/`/`.git` are untouched.
+- Never copied or deleted (the badge rewrites them): `data/panel_config.json` (boot counter), `data/user_apps.py`, `data/app_list`.
+- Listing the badge uses `mpremote exec`, which interrupts `main.py`'s tasks without resetting (boot counter is not bumped). Reset afterwards.
+- Writing to the badge still needs the owner's OK (see working rules): run the dry run, show the plan, then `--apply`.
+- Status: written and syntax-checked, **not yet run against the badge**.
+- The tool is one-way. To pull the badge's state into this dir, use `mpremote fs cp -r : dump/` as before.
 
 Tooling lives in `~/.local/bin` (`mpremote`, `esptool`, `espefuse`, `espsecure`, `pyserial-miniterm`; installed with `uv tool`).
 The serial port is exclusive: only one program can hold `/dev/cu.usbmodem1101` at a time (a running `mpremote fs cp` blocks everything else).
