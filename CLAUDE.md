@@ -66,6 +66,7 @@ Creates, updates and deletes files on the badge so it matches this directory. Co
 - Listing the badge uses `mpremote exec`, which interrupts `main.py`'s tasks without resetting (boot counter is not bumped). Reset afterwards.
 - Writing to the badge still needs the owner's OK (see working rules): run the dry run, show the plan, then `--apply`.
 - Status: written and syntax-checked, **not yet run against the badge**.
+- `tools/preview.py [port]` serves the `webnametag` page locally (default 8080) with a mock badge backend, for browser/mobile styling checks. Host-side only; never synced.
 - The tool is one-way. To pull the badge's state into this dir, use `mpremote fs cp -r : dump/` as before.
 
 Tooling lives in `~/.local/bin` (`mpremote`, `esptool`, `espefuse`, `espsecure`, `pyserial-miniterm`; installed with `uv tool`).

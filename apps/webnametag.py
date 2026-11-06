@@ -52,19 +52,50 @@ _BLACK = lvgl.color_hex(0x000000)
 _RED = lvgl.color_hex(0xFF0000)
 
 # %NAME%, %MAX%, %H%, %QH%, %HEIC_URL% and %HEIC_SRI% are substituted with str.replace (the JS has braces, so no .format).
-_PAGE = """<!DOCTYPE html><html><head>
-<meta name=viewport content='width=device-width,initial-scale=1'><title>Badge</title></head>
-<body style='font-family:sans-serif;max-width:520px;margin:auto;padding:8px'>
-<h2>Badge name</h2><p>Current: <b>%NAME%</b></p>
-<form method=POST action=/><input name=name maxlength=%MAX% autofocus> <button>Set</button></form>
-<h2>Photo (black &amp; white)</h2>
-<input type=file id=f accept='image/*,.heic,.heif'> <span id=m></span>
+_PAGE = """<!DOCTYPE html><html><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1'>
+<meta name=color-scheme content='light dark'><title>Badge</title>
+<style>
+:root{--bg:#f4f1ea;--card:#fff;--fg:#111;--mut:#666;--ln:#d6d1c4;--ac:#d4001a;--on:#fff}
+@media(prefers-color-scheme:dark){:root{--bg:#0b0b0c;--card:#17171a;--fg:#f2f2f2;--mut:#8d8d95;--ln:#2c2c31;--ac:#ff2b3f;--on:#0b0b0c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,sans-serif;
+padding:max(16px,env(safe-area-inset-top)) 16px 32px}
+main{max-width:520px;margin:auto}
+header{display:flex;align-items:center;gap:10px;margin:4px 0 18px}
+header i{width:12px;height:12px;border-radius:50%;background:var(--ac);flex:none}
+h1{font-size:13px;letter-spacing:.14em;text-transform:uppercase;margin:0;color:var(--mut);font-weight:600}
+section{background:var(--card);border:1px solid var(--ln);border-radius:14px;padding:18px;margin-bottom:14px}
+h2{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);margin:0 0 12px;font-weight:600}
+.cur{font-size:26px;font-weight:700;word-break:break-word;margin:0 0 14px;min-height:1.2em}
+.row{display:flex;gap:8px}
+input[type=text]{flex:1;min-width:0;font:inherit;font-size:16px;color:var(--fg);background:var(--bg);
+border:1px solid var(--ln);border-radius:10px;padding:12px 14px;outline:0}
+input[type=text]:focus{border-color:var(--ac)}
+button,label.b{display:inline-block;font:inherit;font-weight:600;color:var(--on);background:var(--ac);border:0;
+border-radius:10px;padding:12px 18px;cursor:pointer;text-align:center;-webkit-appearance:none}
+button:active,label.b:active{opacity:.8}
+label.b{display:block;background:transparent;color:var(--fg);border:1px dashed var(--mut);padding:18px}
+#f{display:none}
+#s{width:100%;margin-top:14px}
+#m{display:block;color:var(--mut);font-size:14px;margin-top:10px;min-height:1.2em}
+canvas{width:100%;display:block;border-radius:10px;border:1px solid var(--ln);touch-action:none;background:#fff}
+input[type=range]{width:100%;accent-color:var(--ac);margin:14px 0 4px}
+.hint{color:var(--mut);font-size:13px;margin:6px 0 0}
+</style></head><body><main>
+<header><i></i><h1>Supercon Badge</h1></header>
+<section><h2>Name</h2><p class=cur>%NAME%</p>
+<form method=POST action=/ class=row><input type=text name=name maxlength=%MAX% placeholder='Your name' autocomplete=off>
+<button>Set</button></form></section>
+<section><h2>Photo (black &amp; white)</h2>
+<label class=b for=f>Choose a photo</label>
+<input type=file id=f accept='image/*,.heic,.heif'><span id=m></span>
 <div id=ed style='display:none'>
-<canvas id=c width=480 height=%QH% style='width:100%;border:1px solid #000;touch-action:none'></canvas>
-<p>Zoom <input type=range id=z min=0 max=100 value=0 style='width:70%'></p>
-<p>Drag to position. The frame is the area under the badge's status bar; nothing is stretched.</p>
+<canvas id=c width=480 height=%QH%></canvas>
+<input type=range id=z min=0 max=100 value=0 aria-label=Zoom>
+<p class=hint>Drag to position, slide to zoom. The frame is the area under the badge's status bar.</p>
 <button id=s>Send to badge</button>
-</div>
+</div></section></main>
 <script>
 var W=960,H=%H%,P=W/2,Q=H/2,img,sc,mn,ox,oy,d=null;
 var f=document.getElementById('f'),c=document.getElementById('c'),x=c.getContext('2d'),
