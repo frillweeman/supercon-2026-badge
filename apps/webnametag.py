@@ -2,11 +2,12 @@
 
 UserA / UserB toggle the WiFi radio. Test app: nothing is persisted.
 
-A status bar (WiFi status left, IP right) is always shown across the top BAR_H rows.
-The web page crops and dithers photos to 1-bit black/white in the browser for the area
-below the bar and POSTs the raw black plane (960 x PHOTO_H, 120 bytes/row, MSB first,
-1 = black) to /photo. The badge copies it into the black framebuffer below the bar;
-LVGL only draws the bar and the name box.
+A status bar (WiFi status left, hostname / IP right, black text) is always shown across
+the top BAR_H rows. The web page crops and dithers photos in the browser for the area
+below the bar and POSTs them to /photo as raw 1-bit planes (960 x PHOTO_H, 120 bytes/row,
+MSB first). Body = black plane (1 = black), optionally followed by a red plane (1 = red);
+a pixel is never set in both. The badge copies the planes into the matching framebuffers
+below the bar; LVGL only draws the bar and the name box.
 """
 
 import asyncio as aio
@@ -49,7 +50,6 @@ PHOTO_OFFSET = ROW_BYTES * BAR_H  # where the photo starts in the framebuffer
 
 _WHITE = lvgl.color_hex(0xFFFFFF)
 _BLACK = lvgl.color_hex(0x000000)
-_RED = lvgl.color_hex(0xFF0000)
 
 # %NAME%, %MAX%, %H%, %QH%, %HEIC_URL% and %HEIC_SRI% are substituted with str.replace (the JS has braces, so no .format).
 _PAGE = """<!DOCTYPE html><html><head><meta charset=utf-8>
@@ -82,27 +82,37 @@ label.b{display:block;background:transparent;color:var(--fg);border:1px dashed v
 canvas{width:100%;display:block;border-radius:10px;border:1px solid var(--ln);touch-action:none;background:#fff}
 input[type=range]{width:100%;accent-color:var(--ac);margin:14px 0 4px}
 .hint{color:var(--mut);font-size:13px;margin:6px 0 0}
+.opt{display:flex;align-items:center;gap:10px;margin:12px 0 0}
+.opt input[type=range]{margin:0;flex:1}
+#pv{margin-top:12px}
+#t{width:100%;margin-top:8px;background:transparent;color:var(--fg);border:1px solid var(--ln)}
 </style></head><body><main>
 <header><i></i><h1>Supercon Badge</h1></header>
 <section><h2>Name</h2><p class=cur>%NAME%</p>
 <form method=POST action=/ class=row><input type=text name=name maxlength=%MAX% placeholder='Your name' autocomplete=off>
 <button>Set</button></form></section>
-<section><h2>Photo (black &amp; white)</h2>
+<section><h2>Photo</h2>
 <label class=b for=f>Choose a photo</label>
 <input type=file id=f accept='image/*,.heic,.heif'><span id=m></span>
 <div id=ed style='display:none'>
 <canvas id=c width=480 height=%QH%></canvas>
 <input type=range id=z min=0 max=100 value=0 aria-label=Zoom>
 <p class=hint>Drag to position, slide to zoom. The frame is the area under the badge's status bar.</p>
+<label class=opt><input type=checkbox id=rc> Use red</label>
+<label class=opt>Red strength <input type=range id=rs min=0 max=100 value=50></label>
+<canvas id=pv width=960 height=%H%></canvas>
+<p class=hint>Preview of what the badge will show.</p>
 <button id=s>Send to badge</button>
-</div></section></main>
+</div>
+<button id=t>Send colour test pattern</button></section></main>
 <script>
 var W=960,H=%H%,P=W/2,Q=H/2,img,sc,mn,ox,oy,d=null;
 var f=document.getElementById('f'),c=document.getElementById('c'),x=c.getContext('2d'),
 z=document.getElementById('z'),m=document.getElementById('m');
 function draw(){
  ox=Math.min(0,Math.max(P-img.width*sc,ox));oy=Math.min(0,Math.max(Q-img.height*sc,oy));
- x.fillStyle='#fff';x.fillRect(0,0,P,Q);x.drawImage(img,ox,oy,img.width*sc,img.height*sc);}
+ x.fillStyle='#fff';x.fillRect(0,0,P,Q);x.drawImage(img,ox,oy,img.width*sc,img.height*sc);
+ prev();}
 function heic(){return window.heic2any?Promise.resolve():new Promise(function(ok,no){
  var s=document.createElement('script');s.src='%HEIC_URL%';s.integrity='%HEIC_SRI%';
  s.crossOrigin='anonymous';s.onload=ok;s.onerror=no;document.head.appendChild(s);});}
@@ -123,20 +133,52 @@ c.onpointerdown=function(e){d=[e.clientX,e.clientY,ox,oy];c.setPointerCapture(e.
 c.onpointermove=function(e){if(!d)return;var k=P/c.getBoundingClientRect().width;
  ox=d[2]+(e.clientX-d[0])*k;oy=d[3]+(e.clientY-d[1])*k;draw();};
 c.onpointerup=function(){d=null;};
-document.getElementById('s').onclick=function(){
- var o=document.createElement('canvas');o.width=W;o.height=H;var g=o.getContext('2d');
+var rc=document.getElementById('rc'),rs=document.getElementById('rs'),
+pvx=document.getElementById('pv').getContext('2d'),tm;
+/* Colours as the panel shows them. White/red are estimates: tune from the test pattern. */
+var PAL=[[255,255,255],[0,0,0],[200,30,30]];
+/* Error-diffusion dither of RGBA bytes p to white/black(/red). Returns the two planes
+   (black then red, 1 bit/px, MSB first, never both set) plus a preview ImageData. */
+function dither(p,red,k){
+ var n=W*H,h=n/8,e=new Float32Array(n*3),out=new Uint8Array(n/4),pv=new ImageData(W,H),
+ q=pv.data,nc=red?3:2,i,j,y,X,ci,R,G,B,best,bd,d,pr,er,eg,eb,l;
+ for(i=0;i<n;i++){j=3*i;
+  if(red){e[j]=p[4*i];e[j+1]=p[4*i+1];e[j+2]=p[4*i+2];}
+  else{l=0.299*p[4*i]+0.587*p[4*i+1]+0.114*p[4*i+2];e[j]=e[j+1]=e[j+2]=l;}}
+ function sp(t,f){t*=3;e[t]+=er*f;e[t+1]+=eg*f;e[t+2]+=eb*f;}
+ for(y=0;y<H;y++)for(X=0;X<W;X++){i=y*W+X;j=3*i;
+  R=Math.min(255,Math.max(0,e[j]));G=Math.min(255,Math.max(0,e[j+1]));B=Math.min(255,Math.max(0,e[j+2]));
+  best=0;bd=1e12;
+  for(ci=0;ci<nc;ci++){pr=PAL[ci];d=(R-pr[0])*(R-pr[0])+(G-pr[1])*(G-pr[1])+(B-pr[2])*(B-pr[2]);
+   if(ci==2)d*=k;if(d<bd){bd=d;best=ci;}}
+  pr=PAL[best];er=R-pr[0];eg=G-pr[1];eb=B-pr[2];
+  if(best==1)out[i>>3]|=128>>(i&7);else if(best==2)out[h+(i>>3)]|=128>>(i&7);
+  q[4*i]=pr[0];q[4*i+1]=pr[1];q[4*i+2]=pr[2];q[4*i+3]=255;
+  if(X<W-1)sp(i+1,7/16);
+  if(y<H-1){if(X>0)sp(i+W-1,3/16);sp(i+W,5/16);if(X<W-1)sp(i+W+1,1/16);}}
+ return{out:out,pv:pv,red:red};}
+function crop(){var o=document.createElement('canvas');o.width=W;o.height=H;var g=o.getContext('2d');
  g.fillStyle='#fff';g.fillRect(0,0,W,H);
- g.drawImage(img,ox*2,oy*2,img.width*sc*2,img.height*sc*2);
- var p=g.getImageData(0,0,W,H).data,n=W*H,e=new Float32Array(n),b=new Uint8Array(n/8),i,y,X;
- for(i=0;i<n;i++)e[i]=0.299*p[4*i]+0.587*p[4*i+1]+0.114*p[4*i+2];
- for(y=0;y<H;y++)for(X=0;X<W;X++){i=y*W+X;var v=e[i],q=v<128?0:255,r=v-q;
-  if(q==0)b[i>>3]|=128>>(i&7);
-  if(X<W-1)e[i+1]+=r*7/16;
-  if(y<H-1){if(X>0)e[i+W-1]+=r*3/16;e[i+W]+=r*5/16;if(X<W-1)e[i+W+1]+=r/16;}}
- m.textContent='Sending...';
- fetch('/photo',{method:'POST',body:b,headers:{'Content-Type':'application/octet-stream'}})
- .then(function(r){return r.text();}).then(function(t){m.textContent=t;})
- .catch(function(){m.textContent='Failed';});};
+ g.drawImage(img,ox*2,oy*2,img.width*sc*2,img.height*sc*2);return g.getImageData(0,0,W,H).data;}
+function run(){return dither(crop(),rc.checked,Math.pow(2,(50-rs.value)/25));}
+/* White, black and red patches plus white-black, white-red and black-red gradients. */
+function pattern(){var o=document.createElement('canvas');o.width=W;o.height=H;var g=o.getContext('2d'),i,gr,
+ cs=['rgb(255,255,255)','rgb(0,0,0)','rgb('+PAL[2].join(',')+')'],pa=[[0,1],[0,2],[1,2]];
+ g.fillStyle=cs[0];g.fillRect(0,0,W,H);
+ for(i=0;i<3;i++){g.fillStyle=cs[i];g.fillRect(i*W/3,0,W/3,H/4);}
+ for(i=0;i<3;i++){gr=g.createLinearGradient(0,0,W,0);gr.addColorStop(0,cs[pa[i][0]]);
+  gr.addColorStop(1,cs[pa[i][1]]);g.fillStyle=gr;g.fillRect(0,H/4*(i+1),W,H/4);}
+ return g.getImageData(0,0,W,H).data;}
+function prev(){clearTimeout(tm);tm=setTimeout(function(){if(img)pvx.putImageData(run().pv,0,0);},250);}
+function send(r){m.textContent='Sending...';
+ fetch('/photo',{method:'POST',body:r.red?r.out:r.out.subarray(0,W*H/8),
+  headers:{'Content-Type':'application/octet-stream'}})
+ .then(function(a){return a.text();}).then(function(t){m.textContent=t;})
+ .catch(function(){m.textContent='Failed';});}
+rc.onchange=rs.oninput=prev;
+document.getElementById('s').onclick=function(){send(run());};
+document.getElementById('t').onclick=function(){m.textContent='Building test pattern...';
+ setTimeout(function(){var r=dither(pattern(),true,1);pvx.putImageData(r.pv,0,0);send(r);},20);};
 </script></body></html>"""
 
 
@@ -174,7 +216,8 @@ class WebNametagApp(BaseApp):
         self.status = "WiFi off"
         self.ip = ""
         self.mode = "name"  # "name" or "photo"
-        self._photo = None  # bytearray(PHOTO_BYTES) while in photo mode
+        # bytearray of PHOTO_BYTES (black only) or 2*PHOTO_BYTES (black then red) in photo mode
+        self._photo = None
         self._need_full = False
         self._wifi_on = False
         self._connect_start = 0
@@ -287,7 +330,7 @@ class WebNametagApp(BaseApp):
                 if h.lower().startswith(b"content-length:"):
                     clen = int(h.split(b":", 1)[1])
             if method == b"POST" and path == b"/photo":
-                if clen != PHOTO_BYTES:
+                if clen not in (PHOTO_BYTES, 2 * PHOTO_BYTES):
                     msg = b"Bad photo size"
                     writer.write(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n" + msg)
                 else:
@@ -359,12 +402,12 @@ class WebNametagApp(BaseApp):
             lbl.set_text("")
             return b, lbl
 
-        # Status bar (red text): WiFi status left, "hostname.local  ip" right, BAR_H
-        # tall, always shown. 300 + 630 + margins fit in 960 px without overlapping.
+        # Status bar: WiFi status left, "hostname.local / ip" right, BAR_H tall, always
+        # shown. 300 + 630 + margins fit in 960 px without overlapping.
         self._status_box, self._status_lbl = box(
-            300, BAR_H, lvgl.font_montserrat_24, _RED, lvgl.ALIGN.TOP_LEFT, 10, 0)
+            300, BAR_H, lvgl.font_montserrat_24, _BLACK, lvgl.ALIGN.TOP_LEFT, 10, 0)
         self._ip_box, self._ip_lbl = box(
-            630, BAR_H, lvgl.font_montserrat_24, _RED, lvgl.ALIGN.TOP_RIGHT, -10, 0)
+            630, BAR_H, lvgl.font_montserrat_24, _BLACK, lvgl.ALIGN.TOP_RIGHT, -10, 0)
         # Name box is centred in the area below the bar; only used in name mode.
         self._name_box, self._name_lbl = box(
             900, 70, lvgl.font_montserrat_48, _BLACK, lvgl.ALIGN.CENTER, 0, BAR_H // 2)
@@ -377,7 +420,7 @@ class WebNametagApp(BaseApp):
         shown = SSID[:16] if self.status == "Connected" and SSID else self.status
         self._status_lbl.set_text("WiFi: " + shown)
         self._status_lbl.align(lvgl.ALIGN.LEFT_MID, 0, 0)
-        self._ip_lbl.set_text((HOSTNAME + ".local  " + self.ip) if self.ip else "")
+        self._ip_lbl.set_text((HOSTNAME + ".local / " + self.ip) if self.ip else "")
         self._ip_lbl.align(lvgl.ALIGN.RIGHT_MID, 0, 0)
         if self.mode == "name":
             self._name_lbl.set_text(self.name_text)
@@ -389,8 +432,12 @@ class WebNametagApp(BaseApp):
         if full:
             display.clear()  # framebuffers to white; LVGL only paints our boxes
             if self.mode == "photo" and self._photo is not None:
-                # Photo goes below the bar; red plane stays empty (black & white only).
-                display._framebuffer_black[PHOTO_OFFSET : PHOTO_OFFSET + PHOTO_BYTES] = self._photo
+                # Photo goes below the bar. First plane is black; an optional second is red.
+                pv = memoryview(self._photo)
+                end = PHOTO_OFFSET + PHOTO_BYTES
+                display._framebuffer_black[PHOTO_OFFSET:end] = pv[:PHOTO_BYTES]
+                if len(pv) > PHOTO_BYTES:
+                    display._framebuffer_red[PHOTO_OFFSET:end] = pv[PHOTO_BYTES:]
             lvgl.screen_load(self._scr)
         self._set_texts()
         if full:
