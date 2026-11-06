@@ -28,12 +28,12 @@ See "Open questions" at the bottom before relying on any [inferred] item.
 |---|---|
 | `boot.py` | Empty (comments only; `webrepl` lines are commented out). |
 | `main.py` | Starts 4 asyncio tasks: button scan, display, LED update, app switcher. Prints a 60 s heartbeat with `micropython.mem_info()` (this is what you see on the serial console). |
-| `apps/` | One file per app. Auto-discovered. |
+| `apps/` | One file per app. Auto-discovered. Menu order = alphabetical by filename, so apps are named `a0_`, `a1_`, ... (a letter prefix is required: a leading digit or `_` breaks the import). |
 | `lib/` | Drivers + launcher: `epd.py`, `led_bar.py`, `button.py`, `sao.py`, `board.py`, `app_switcher.py`, `app_list.py`, PNG helpers (`PNGdecoder.py`, `large_png.py`), `zlib.py`, `json_configs.py`. |
 | `tools/` | Host-side scripts, **not synced to the badge**. `sync.py` pushes this dir to the badge (see below). |
 | `data/` | Assets and state: `gallery/` (44 PNGs), `graphics/` (10 PNGs), `schedule.csv`, `rendered_luts.py` (EPD waveform tables), `panel_config.json`, `user_apps.py`, `app_list`. |
 
-Built-in apps: Workshops, Sat Talks, Sun Talks (all from `apps/schedule.py`), Gallery, Nametag.
+Built-in apps: Workshops, Sat Talks, Sun Talks (all from `apps/a2_schedule.py`), Gallery, Nametag.
 
 ## How apps work [code]
 
@@ -76,10 +76,10 @@ The serial port is exclusive: only one program can hold `/dev/cu.usbmodem1101` a
 
 - `main.py` increments `load_counter` in `data/panel_config.json` on **every boot** (it is 5 in this dump, and our own resets contributed). At counter == 1 it shows the splash screen; at counter == 42 it tries to draw `/data/graphics/never-epd.png`. The file on disk is `never_epd.png` (underscore), so that path will likely fail at boot 42. Not verified on hardware. Don't reset 37 more times by accident unless you want to find out.
 - `lib/base_app.py` is a different, older copy of `apps/base_app.py` (uses `first_launch` instead of `launched`, no `gc.collect()`). Apps import `apps.base_app`. I have not confirmed whether anything imports the `lib/` one.
-- `apps/nametag.py` sets both name labels to `""`, so the nametag shows no name as shipped. Where the name is meant to come from is unknown.
+- `apps/a1_nametag.py` sets both name labels to `""`, so the nametag shows no name as shipped. Where the name is meant to come from is unknown.
 - `data/graphics/SayItWithMe_blank.png` is not referenced by any `.py` file in this dump.
 - `lib/sao.py` `Sao.set_address()` sets `self.address = 0` regardless of its `addr` argument. Looks like a bug; unverified.
-- `apps/gallery.py` hardcodes `maximage = 44`; matches the 44 files present.
+- `apps/a0_gallery.py` hardcodes `maximage = 44`; matches the 44 files present.
 - Heap is nearly full at idle (about 1.52 MB of 1.58 MB used in the boot log), so large allocations in a new app may fail. Call `gc.collect()` and keep buffers small.
 - No code in this dump uses `bluetooth`, `network`, or WiFi, even though the firmware includes them. `boot.py` has `webrepl` commented out only.
 
@@ -101,7 +101,7 @@ This is the Python filesystem only. It does **not** include the MicroPython firm
 
 ## Idea under investigation (not implemented): set the nametag name from a web page
 
-Feasible on paper. Preferred design: badge hosts its own WiFi AP (phone joins, opens `http://192.168.4.1`), tiny `asyncio.start_server` HTTP form, name saved with `lib.json_configs.append()` into `data/panel_config.json`, `apps/nametag.py` reads it on launch and redraws. Gate the AP behind a button-held "pairing mode" with a timeout rather than leaving it always on.
+Feasible on paper. Preferred design: badge hosts its own WiFi AP (phone joins, opens `http://192.168.4.1`), tiny `asyncio.start_server` HTTP form, name saved with `lib.json_configs.append()` into `data/panel_config.json`, `apps/a1_nametag.py` reads it on launch and redraws. Gate the AP behind a button-held "pairing mode" with a timeout rather than leaving it always on.
 Risks: heap is ~96% full at idle and the WiFi stack needs RAM (biggest unknown, test by starting the AP briefly and comparing `gc.mem_free()`); SoftSPI e-paper redraws block the event loop; font may only cover ASCII; Web Bluetooth alternative works on Android Chrome only (no `aioble` installed).
 
 ## Open questions (answer these and I'll fold them into the file)

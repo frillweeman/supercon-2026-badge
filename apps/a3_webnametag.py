@@ -1,6 +1,13 @@
 """Web Nametag: join WiFi, serve a tiny web page, show a typed name or an uploaded photo.
 
-UserA / UserB toggle the WiFi radio. Test app: nothing is persisted.
+UserA toggles the WiFi radio; UserB resets the screen to the generated "Control me!" home
+graphic (which also clears any name/photo). Nothing is persisted.
+
+The home graphic (drawn in code, no image file) has a legend for the LED bar above the screen,
+shows a QR code for http://<ip> with "hostname / ip" underneath, and explains
+the two buttons. There is no status bar: the screen is only redrawn when its content
+changes (new name/photo, reset, or the IP appearing/disappearing on the home graphic), and
+the first home draw waits until WiFi has connected or failed.
 
 The LED bar shows the state: green = WiFi connected, red = WiFi failed, orange chase =
 connecting or loading a new name/image, dark = WiFi off. While a submission is being
@@ -9,12 +16,10 @@ with 503 and a wait message; nothing is queued.
 
 The page also polls GET /status (busy / mode / name) to show when the panel has finished.
 
-A status bar (WiFi status left, hostname / IP right, black text) is always shown across
-the top BAR_H rows. The web page crops and dithers photos in the browser for the area
-below the bar and POSTs them to /photo as raw 1-bit planes (960 x PHOTO_H, 120 bytes/row,
-MSB first). Body = black plane (1 = black), optionally followed by a red plane (1 = red);
-a pixel is never set in both. The badge copies the planes into the matching framebuffers
-below the bar; LVGL only draws the bar and the name box.
+The web page crops and dithers photos in the browser for the whole panel and POSTs them to
+/photo as raw 1-bit planes (960 x PHOTO_H, 120 bytes/row, MSB first). Body = black plane
+(1 = black), optionally followed by a red plane (1 = red); a pixel is never set in both.
+The badge copies the planes into the framebuffers; LVGL only draws text.
 """
 
 import asyncio as aio
@@ -30,6 +35,7 @@ from apps.base_app import BaseApp
 from lib.button import UserA, UserB
 from lib.epd import display
 from lib.led_bar import NUM_LEDS, leds
+from lib.qr import make as qr_make
 
 # WiFi settings live in data/webnametag_config.py (untracked; see the .example.py).
 # A failed import here would break app_switcher's `from apps import ...` for ALL apps at
@@ -51,11 +57,9 @@ except Exception as _ex:
 HEIC_URL = "https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"
 HEIC_SRI = "sha384-OTofQ0MEeiSgh62havBcemCIK0gqj809wX6UA0uPISNMRnR6NZyCdGzX3SbLrgwL"
 MAX_NAME = 24
-BAR_H = 32  # status bar height in px, always drawn at the top
 ROW_BYTES = 960 // 8  # 120 bytes per framebuffer row
-PHOTO_H = 672 - BAR_H  # 640 rows left for the photo
-PHOTO_BYTES = ROW_BYTES * PHOTO_H  # 76800, one 1-bit plane
-PHOTO_OFFSET = ROW_BYTES * BAR_H  # where the photo starts in the framebuffer
+PHOTO_H = 672  # the photo covers the whole panel
+PHOTO_BYTES = ROW_BYTES * PHOTO_H  # 80640, one 1-bit plane
 
 ACTIVE_WINDOW_MS = 1000  # run() executed this recently => the app is on screen
 
@@ -73,6 +77,55 @@ _FAILED_STATUSES = ("Failed", "Server failed", "No config")
 
 _WHITE = lvgl.color_hex(0xFFFFFF)
 _BLACK = lvgl.color_hex(0x000000)
+_RED = lvgl.color_hex(0xFF0000)
+
+
+def _font(*names):
+    """First LVGL font in this build from names (sizes beyond 14/16/24/48 are unverified)."""
+    for n in names:
+        f = getattr(lvgl, n, None)
+        if f is not None:
+            return f
+    return lvgl.font_montserrat_24
+
+
+F_SMALL = _font("font_montserrat_16")
+F_BODY = _font("font_montserrat_24")
+F_CAP = _font("font_montserrat_20", "font_montserrat_24")
+F_HEAD = _font("font_montserrat_28", "font_montserrat_24")
+F_TITLE = _font("font_montserrat_48")
+
+# Home graphic geometry (px). QR is 25 modules * 16 px = 400, x origin byte-aligned.
+QR_SCALE = 16
+QR_PX = 25 * QR_SCALE
+QR_X = 280
+QR_Y = 190
+PANEL_W, PANEL_H, PANEL_Y = 200, 240, 270
+
+
+def _fill(buf, x, y, w, h):
+    """Set a w x h rectangle of bits in a 1-bit framebuffer plane."""
+    x2 = x + w - 1
+    b0, b1 = x >> 3, x2 >> 3
+    m0 = 0xFF >> (x & 7)
+    m1 = (0xFF << (7 - (x2 & 7))) & 0xFF
+    mid = b"\xff" * (b1 - b0 - 1) if b1 - b0 > 1 else b""
+    for row in range(y, y + h):
+        base = row * ROW_BYTES
+        if b0 == b1:
+            buf[base + b0] |= m0 & m1
+        else:
+            buf[base + b0] |= m0
+            buf[base + b1] |= m1
+            if mid:
+                buf[base + b0 + 1 : base + b1] = mid
+
+
+def _frame(buf, x, y, w, h, t=4):
+    _fill(buf, x, y, w, t)
+    _fill(buf, x, y + h - t, w, t)
+    _fill(buf, x, y, t, h)
+    _fill(buf, x + w - t, y, t, h)
 
 
 def _chase():
@@ -300,7 +353,7 @@ function render(){clearTimeout(tm);if(tab!='p'||!img)return;
  $$('ld','flex');tm=setTimeout(function(){pvx.putImageData(res().pv,0,0);$$('ld','none');},60);}
 function tabTo(t){tab=t; $$('c',t=='c'?'block':'none');$$('pv',t=='p'?'block':'none');$$('zr',t=='c'?'flex':'none');$$('ld','none');$$('cs',t=='p'?'grid':'none');
  $('ttl').textContent='Step '+(t=='c'?1:2)+' of 2';$('cx').textContent=t=='c'?'Cancel':'Back';ss.textContent=t=='c'?'Next':'Send';
- $('hn').textContent=t=='c'?'Drag the photo to position it and use Zoom to size it. The frame is the area below the badge status bar.':
+ $('hn').textContent=t=='c'?'Drag the photo to position it and use Zoom to size it. The frame is the whole badge screen.':
   'This is how the badge will show it. Pick black and white or add red, then send.';
  render();}
 function setRed(v){rc=v;$('bw').setAttribute('aria-pressed',!v);$('br').setAttribute('aria-pressed',v);$$('rr',v?'flex':'none');
@@ -370,7 +423,7 @@ class WebNametagApp(BaseApp):
         self.name_text = ""
         self.status = "WiFi off"
         self.ip = ""
-        self.mode = "name"  # "name" or "photo"
+        self.mode = "home"  # "home" (generated graphic), "name" or "photo"
         # bytearray of PHOTO_BYTES (black only) or 2*PHOTO_BYTES (black then red) in photo mode
         self._photo = None
         self._need_full = False
@@ -381,8 +434,9 @@ class WebNametagApp(BaseApp):
         self._connect_start = 0
         self._sta = None
         self._server = None
-        self._drawn = None  # snapshot of what is on screen
-        self._built = False
+        self._drawn = None  # (mode, name) on screen
+        self._drawn_ip = None  # IP in the home QR (None = placeholder or not home)
+        self._scr = None
 
     # ---- WiFi ----------------------------------------------------------
     def _wifi_enable(self):
@@ -461,23 +515,33 @@ class WebNametagApp(BaseApp):
         # gap of up to 100 ms between update() and the refresh starting.
         return display._framebuffer_ready.is_set() or not display.is_done_updating()
 
+    def _pending(self):
+        """A redraw is due. The home graphic waits while WiFi is still connecting.
+        Turning WiFi off never redraws; the home QR is only refreshed when an IP appears
+        or changes, and the WiFi-off placeholder only shows on an explicit reset."""
+        if self.mode == "home":
+            if self.status == "Connecting...":
+                return False
+            return self._need_full or (bool(self.ip) and self.ip != self._drawn_ip)
+        return self._need_full or self._drawn != (self.mode, self.name_text)
+
     def _busy(self):
         """Is a submission being deployed right now? New submissions are rejected then."""
         if self._receiving or self._display_busy():
             return True
         # Pending redraw only counts while we're on screen: run() is what clears it.
         # While away, a submission is just stored and drawn on re-entry.
-        return self._active() and (
-            self._need_full or self._drawn != (self.status, self.ip, self.name_text)
-        )
+        return self._active() and self._pending()
 
     def _led_wanted(self):
+        # Busy comes first so a button press shows the loading animation immediately,
+        # whatever the WiFi state is.
+        if self.status == "Connecting..." or self._busy():
+            return "orange"
         if self.status in _FAILED_STATUSES:
             return "red"
         if self.status == "WiFi off":
             return "off"
-        if self.status == "Connecting..." or self._busy():
-            return "orange"
         return "green"  # Connected and idle
 
     def _update_leds(self):
@@ -581,10 +645,9 @@ class WebNametagApp(BaseApp):
                     if field.startswith(b"name="):
                         self.name_text = _urldecode(field[5:])[:MAX_NAME]
                         print("webnametag: name ->", repr(self.name_text))
-                if self.mode == "photo":
-                    self.mode = "name"
-                    self._photo = None
-                    self._need_full = True
+                self.mode = "name" if self.name_text else "home"
+                self._photo = None
+                self._need_full = True
                 # The page shows this as the current name.
                 writer.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
@@ -629,80 +692,115 @@ class WebNametagApp(BaseApp):
                 pass
 
     # ---- Display -------------------------------------------------------
-    def _build_screen(self):
-        # LVGL -> framebuffer conversion (epd._lv_flush) is a pure-Python per-pixel
-        # loop, so repainting the full 960x672 panel takes ages. Keep the screen
-        # transparent over a pre-cleared white framebuffer, and draw text only in
-        # small fixed-size OPAQUE white boxes so stale pixels get covered.
+    def _box(self, parent, x, y, w, h, font, color, bg, text):
+        """Fixed-size opaque box with a centred label. LVGL -> framebuffer conversion
+        (epd._lv_flush) is a pure-Python per-pixel loop, so only these boxes are ever
+        repainted; everything else is drawn straight into the framebuffers."""
+        b = lvgl.obj(parent)
+        b.remove_style_all()
+        b.set_size(w, h)
+        b.set_style_bg_color(bg, 0)
+        b.set_style_bg_opa(lvgl.OPA.COVER, 0)
+        b.align(lvgl.ALIGN.TOP_LEFT, x, y)
+        lbl = lvgl.label(b)
+        lbl.set_style_text_font(font, 0)
+        lbl.set_style_text_color(color, 0)
+        try:
+            lbl.set_style_text_align(lvgl.TEXT_ALIGN.CENTER, 0)
+        except Exception:
+            pass
+        lbl.set_text(text)
+        lbl.align(lvgl.ALIGN.CENTER, 0, 0)
+        self._boxes.append(b)
+
+    def _home_placeholder(self):
+        st = self.status
+        if st == "No config":
+            return "No WiFi config\non this badge"
+        if st in _FAILED_STATUSES:
+            return "WiFi failed\n\nPress Left Btn\nto retry"
+        return "WiFi is off\n\nPress Left Btn\nto turn it on"
+
+    def _draw_home(self, fb, scr):
+        # Legend table: header above, meaning below, one column per LED colour.
+        _fill(fb, 180, 56, 600, 2)
+        for n, (head, val) in enumerate((
+            ("Green", "Wi-Fi Connected"),
+            ("Red", "Wi-Fi Failed"),
+            ("Orange", "Loading"),
+            ("Off", "Wi-Fi Off"),
+        )):
+            x = 180 + n * 150
+            self._box(scr, x, 22, 150, 32, F_BODY, _BLACK, _WHITE, head)
+            self._box(scr, x, 62, 150, 24, F_SMALL, _BLACK, _WHITE, val)
+        # --- title ---
+        self._box(scr, 180, 100, 600, 70, F_TITLE, _RED, _WHITE, "Control Me!")
+        # --- QR or placeholder ---
+        if self.ip:
+            rows = qr_make("http://" + self.ip)
+            on, off = b"\xff" * (QR_SCALE // 8), b"\x00" * (QR_SCALE // 8)
+            for r, row in enumerate(rows):
+                line = b"".join([on if m else off for m in row])
+                for sl in range(QR_SCALE):
+                    o = (QR_Y + r * QR_SCALE + sl) * ROW_BYTES + (QR_X >> 3)
+                    fb[o : o + len(line)] = line
+            cap = HOSTNAME + ".local  /  " + self.ip
+        else:
+            _frame(fb, QR_X, QR_Y, QR_PX, QR_PX)
+            self._box(scr, QR_X + 20, QR_Y + 100, QR_PX - 40, 200, F_BODY, _BLACK, _WHITE,
+                      self._home_placeholder())
+            cap = HOSTNAME + ".local"
+        self._box(scr, 180, QR_Y + QR_PX + 14, 600, 34, F_CAP, _BLACK, _WHITE, cap)
+        # --- button tutorial: black header bar, outlined panel ---
+        for x, head, body in (
+            (24, "Left Btn", "Toggle the\nWiFi radio\non / off"),
+            (960 - 24 - PANEL_W, "Right Btn", "Clear\nthe Image"),
+        ):
+            _frame(fb, x, PANEL_Y, PANEL_W, PANEL_H)
+            _fill(fb, x, PANEL_Y, PANEL_W, 52)
+            self._box(scr, x, PANEL_Y, PANEL_W, 52, F_HEAD, _WHITE, _BLACK, head)
+            self._box(scr, x + 6, PANEL_Y + 60, PANEL_W - 12, PANEL_H - 70, F_BODY,
+                      _BLACK, _WHITE, body)
+
+    def _redraw(self):
+        """Clear the panel, draw the current content, refresh."""
+        display.clear()  # framebuffers to white; LVGL only paints our boxes
+        fb = display._framebuffer_black
+        if self.mode == "photo" and self._photo is not None:
+            # First plane is black; an optional second is red.
+            pv = memoryview(self._photo)
+            fb[0:PHOTO_BYTES] = pv[:PHOTO_BYTES]
+            if len(pv) > PHOTO_BYTES:
+                display._framebuffer_red[0:PHOTO_BYTES] = pv[PHOTO_BYTES:]
+        # Fresh transparent screen each time, holding only the boxes this mode needs.
+        old = self._scr
         scr = lvgl.obj()
         scr.remove_style_all()
         scr.set_size(lvgl.pct(100), lvgl.pct(100))
         scr.set_style_bg_opa(lvgl.OPA.TRANSP, 0)
-
-        def box(w, h, font, color, align, x, y):
-            b = lvgl.obj(scr)
-            b.remove_style_all()
-            b.set_size(w, h)
-            b.set_style_bg_color(_WHITE, 0)
-            b.set_style_bg_opa(lvgl.OPA.COVER, 0)
-            b.align(align, x, y)
-            lbl = lvgl.label(b)
-            lbl.set_style_text_font(font, 0)
-            lbl.set_style_text_color(color, 0)
-            lbl.set_text("")
-            return b, lbl
-
-        # Status bar: WiFi status left, "hostname.local / ip" right, BAR_H tall, always
-        # shown. 300 + 630 + margins fit in 960 px without overlapping.
-        self._status_box, self._status_lbl = box(
-            300, BAR_H, lvgl.font_montserrat_24, _BLACK, lvgl.ALIGN.TOP_LEFT, 10, 0)
-        self._ip_box, self._ip_lbl = box(
-            630, BAR_H, lvgl.font_montserrat_24, _BLACK, lvgl.ALIGN.TOP_RIGHT, -10, 0)
-        # Name box is centred in the area below the bar; only used in name mode.
-        self._name_box, self._name_lbl = box(
-            900, 70, lvgl.font_montserrat_48, _BLACK, lvgl.ALIGN.CENTER, 0, BAR_H // 2)
-
+        self._boxes = []
+        if self.mode == "home":
+            self._draw_home(fb, scr)
+        elif self.mode == "name":
+            self._box(scr, 30, 301, 900, 70, F_TITLE, _BLACK, _WHITE, self.name_text)
         self._scr = scr
-        self._built = True
-
-    def _set_texts(self):
-        # When connected, show which network we're on instead of the word "Connected".
-        shown = SSID[:16] if self.status == "Connected" and SSID else self.status
-        self._status_lbl.set_text("WiFi: " + shown)
-        self._status_lbl.align(lvgl.ALIGN.LEFT_MID, 0, 0)
-        self._ip_lbl.set_text((HOSTNAME + ".local / " + self.ip) if self.ip else "")
-        self._ip_lbl.align(lvgl.ALIGN.RIGHT_MID, 0, 0)
-        if self.mode == "name":
-            self._name_lbl.set_text(self.name_text)
-            self._name_lbl.align(lvgl.ALIGN.CENTER, 0, 0)
-
-    def _redraw(self, full=False):
-        """Render only what changed. full=True clears the panel and redraws everything."""
-        new = (self.status, self.ip, self.name_text)
-        if full:
-            display.clear()  # framebuffers to white; LVGL only paints our boxes
-            if self.mode == "photo" and self._photo is not None:
-                # Photo goes below the bar. First plane is black; an optional second is red.
-                pv = memoryview(self._photo)
-                end = PHOTO_OFFSET + PHOTO_BYTES
-                display._framebuffer_black[PHOTO_OFFSET:end] = pv[:PHOTO_BYTES]
-                if len(pv) > PHOTO_BYTES:
-                    display._framebuffer_red[PHOTO_OFFSET:end] = pv[PHOTO_BYTES:]
-            lvgl.screen_load(self._scr)
-        self._set_texts()
-        if full:
-            self._scr.update_layout()
-            # screen_load queued a full-panel dirty area; drop it, keep only our boxes.
-            display.lv_display.inv_p = 0
-            boxes = [self._status_box, self._ip_box]
-            if self.mode == "name":
-                boxes.append(self._name_box)
-            for b in boxes:
-                b.invalidate()
+        lvgl.screen_load(scr)
+        if old is not None:
+            try:
+                old.delete()
+            except Exception as ex:
+                print("webnametag: old screen delete failed", ex)
+        scr.update_layout()
+        # screen_load queued a full-panel dirty area; drop it, keep only our boxes.
+        display.lv_display.inv_p = 0
+        for b in self._boxes:
+            b.invalidate()
         lvgl.refr_now(display.lv_display)
         display.update()
-        self._drawn = new
+        self._drawn = (self.mode, self.name_text)
+        self._drawn_ip = self.ip if self.mode == "home" and self.ip else None
         self._need_full = False
+        gc.collect()
 
     # ---- App loop ------------------------------------------------------
     def run(self):
@@ -710,19 +808,24 @@ class WebNametagApp(BaseApp):
         # this app is selected, so a name or photo submitted while away is drawn on re-entry.
         self._last_run_ms = time.ticks_ms()
         if self.launched:
-            if not self._built:
-                self._build_screen()
             if not self._wifi_on:  # first launch, or retry after "Failed"/"WiFi off"
                 self._wifi_enable()
             self._need_full = True  # draw below, once the panel is idle
             self._led_state = None  # the launcher blanked the LEDs; re-apply ours
             return
 
-        if UserA.pressed() or UserB.pressed():
-            if self._wifi_on:
+        if UserA.pressed():
+            if self._wifi_on and self.status not in _FAILED_STATUSES:
                 self._wifi_disable()
-            else:
+            else:  # off, or failed: (re)start
+                if self._wifi_on:
+                    self._wifi_disable()
                 self._wifi_enable()
+        if UserB.pressed() and not self._busy():  # ignore presses while already working
+            self.mode = "home"
+            self.name_text = ""
+            self._photo = None
+            self._need_full = True
 
         self._poll_wifi()
         self._update_leds()
@@ -733,7 +836,5 @@ class WebNametagApp(BaseApp):
         if self._display_busy():
             return
 
-        if self._need_full:
-            self._redraw(full=True)
-        elif self._drawn != (self.status, self.ip, self.name_text):
+        if self._pending():
             self._redraw()
