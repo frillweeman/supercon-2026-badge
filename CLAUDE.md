@@ -9,7 +9,10 @@ See "Open questions" at the bottom before relying on any [inferred] item.
 
 ## Hardware (from lib/*.py)
 
-- MCU: ESP32 family, running MicroPython (`sys.platform == "esp32"`, `btree`, `asyncio`, `machine.I2CTarget` referenced in docs link to MicroPython v1.27). Exact chip/PSRAM **not confirmed** — see open questions. [inferred: ESP32-S3, because GPIO numbers up to 48 are used and boot log shows a ~6.4 MB "max new split" heap]
+- MCU: **ESP32-S3 with octal SPIRAM**, confirmed by REPL probe: `_machine='Billboard Badge Generic ESP32S3 module with Octal-SPIRAM with ESP32S3'`. (Not yet cross-checked with `esptool chip-id`.)
+- Firmware: MicroPython, `sys.implementation.version` = 1.24.1, custom ("dirty") build dated 2026-11-04. `sys.version` says `v1.20.0-2527.g44aa2b153.dirty`, which conflicts with 1.24.1; unresolved, trust 1.24.1 for now.
+- Radios (REPL probe): `network` (WLAN STA and AP interfaces exist, both inactive at idle), `bluetooth`, `espnow`, `socket`, `webrepl` all import. The radio has **not** been switched on yet, so actual WiFi/BLE function and RAM headroom are untested.
+- Not installed: `aioble`, `microdot`.
 - Display: 960x672 e-paper, black + red framebuffers, two controllers (CS1/CS2) each driving half the width. Driver in `lib/epd.py` is a port of Pervasive Displays `EPD_Driver_GU_large`. Uses **SoftSPI** at 8 MHz. LVGL draws into it.
 - LEDs: 8x WS2812 on GPIO 38 (`lib/led_bar.py`, `NUM_LEDS = 8`).
 - Buttons (active low, pull-up) in `lib/button.py`. Note the code says **plus/minus are mislabeled on the silkscreen**:
@@ -64,7 +67,7 @@ The serial port is exclusive: only one program can hold `/dev/cu.usbmodem1101` a
 - `lib/sao.py` `Sao.set_address()` sets `self.address = 0` regardless of its `addr` argument. Looks like a bug; unverified.
 - `apps/gallery.py` hardcodes `maximage = 44`; matches the 44 files present.
 - Heap is nearly full at idle (about 1.52 MB of 1.58 MB used in the boot log), so large allocations in a new app may fail. Call `gc.collect()` and keep buffers small.
-- No code in this dump uses `bluetooth`, `network`, or WiFi. `boot.py` has `webrepl` commented out only.
+- No code in this dump uses `bluetooth`, `network`, or WiFi, even though the firmware includes them. `boot.py` has `webrepl` commented out only.
 
 ## Not in this dump
 
@@ -76,12 +79,22 @@ This is the Python filesystem only. It does **not** include the MicroPython firm
 - Prefer read-only commands. Ask before: writing to the badge's filesystem, running `esptool` write/erase commands, or anything that touches eFuses (`espefuse` is irreversible).
 - Keep temporary files out of this directory.
 
+## Answered since first draft
+
+- Chip: ESP32-S3 + octal PSRAM (REPL probe). MicroPython 1.24.1 (see Hardware for the version-string mismatch).
+- WiFi and BLE modules are present in the firmware (import only; radio untested).
+- Repo: `git init` done, initial commit made.
+
+## Idea under investigation (not implemented): set the nametag name from a web page
+
+Feasible on paper. Preferred design: badge hosts its own WiFi AP (phone joins, opens `http://192.168.4.1`), tiny `asyncio.start_server` HTTP form, name saved with `lib.json_configs.append()` into `data/panel_config.json`, `apps/nametag.py` reads it on launch and redraws. Gate the AP behind a button-held "pairing mode" with a timeout rather than leaving it always on.
+Risks: heap is ~96% full at idle and the WiFi stack needs RAM (biggest unknown, test by starting the AP briefly and comparing `gc.mem_free()`); SoftSPI e-paper redraws block the event loop; font may only cover ASCII; Web Bluetooth alternative works on Android Chrome only (no `aioble` installed).
+
 ## Open questions (answer these and I'll fold them into the file)
 
-1. **Chip identity.** Is it an ESP32-S3 (with PSRAM)? `esptool chip-id` / `flash-id` has not been run. Everything above says "ESP32 family" for now.
-2. **MicroPython version and build.** Check `import sys; print(sys.implementation, sys.version)` over the REPL. Needed to know which modules exist.
-3. **Is BLE available?** `import bluetooth` has not been tried. Decides the Bluetooth ideas we discussed.
-4. **Flash layout.** Partition table not read; filesystem type (littlefs vs FAT) and free space unknown.
-5. **Nametag name.** Was the name supposed to be set at the conference (by a kiosk, by phone, by editing a file)? Do you know?
-6. **Official docs.** Is there a Hackaday/Supercon badge repo or guide for this year's badge? I have only inferred behavior from this dump.
-7. **Version control.** Should I `git init` this directory so changes are tracked? I have not.
+1. **Flash layout.** Partition table not read; filesystem type (littlefs vs FAT) and free space unknown.
+2. **Nametag name.** Was the name supposed to be set at the conference (kiosk, phone, editing a file)? Unknown.
+3. **Official docs.** Is there a Hackaday/Supercon repo or guide for this year's badge? Everything here is inferred from the dump.
+4. **Does WiFi actually run?** Radio on, AP up, RAM left? Needs a short non-persistent test.
+5. **Version string mismatch** (1.24.1 vs v1.20.0 in `sys.version`).
+6. **Full-flash backup** (`esptool read-flash`) still not taken.
