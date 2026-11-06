@@ -2,6 +2,11 @@
 
 UserA / UserB toggle the WiFi radio. Test app: nothing is persisted.
 
+The LED bar shows the state: green = WiFi connected, red = WiFi failed, orange chase =
+connecting or loading a new name/image, dark = WiFi off. While a submission is being
+deployed (upload in progress, redraw pending, or panel refreshing) new POSTs are rejected
+with 503 and a wait message; nothing is queued.
+
 A status bar (WiFi status left, hostname / IP right, black text) is always shown across
 the top BAR_H rows. The web page crops and dithers photos in the browser for the area
 below the bar and POSTs them to /photo as raw 1-bit planes (960 x PHOTO_H, 120 bytes/row,
@@ -21,6 +26,7 @@ import network
 from apps.base_app import BaseApp
 from lib.button import UserA, UserB
 from lib.epd import display
+from lib.led_bar import NUM_LEDS, leds
 
 # WiFi settings live in data/webnametag_config.py (untracked; see the .example.py).
 # A failed import here would break app_switcher's `from apps import ...` for ALL apps at
@@ -48,8 +54,31 @@ PHOTO_H = 672 - BAR_H  # 640 rows left for the photo
 PHOTO_BYTES = ROW_BYTES * PHOTO_H  # 76800, one 1-bit plane
 PHOTO_OFFSET = ROW_BYTES * BAR_H  # where the photo starts in the framebuffer
 
+ACTIVE_WINDOW_MS = 1000  # run() executed this recently => the app is on screen
+
+# LED colours. The LEDs are very bright; other apps use 0..3 per channel. Tune by eye.
+LED_OFF = (0, 0, 0)
+LED_RED = (3, 0, 0)
+LED_GREEN = (0, 2, 0)
+LED_ORANGE = (3, 1, 0)
+LED_ORANGE_TAIL = (1, 0, 0)
+CHASE_STEP_MS = 90
+_LED_FILL = {"red": LED_RED, "green": LED_GREEN, "off": LED_OFF}
+_FAILED_STATUSES = ("Failed", "Server failed", "No config")
+
 _WHITE = lvgl.color_hex(0xFFFFFF)
 _BLACK = lvgl.color_hex(0x000000)
+
+
+def _chase():
+    """LED sequence (see LedBar.set_sequence): an orange pixel sweeping along the bar."""
+    i = 0
+    while True:
+        frame = [LED_OFF] * NUM_LEDS
+        frame[(i - 1) % NUM_LEDS] = LED_ORANGE_TAIL
+        frame[i % NUM_LEDS] = LED_ORANGE
+        yield frame, CHASE_STEP_MS
+        i += 1
 
 # %NAME%, %MAX%, %H%, %QH%, %HEIC_URL% and %HEIC_SRI% are substituted with str.replace (the JS has braces, so no .format).
 _PAGE = """<!DOCTYPE html><html><head><meta charset=utf-8>
@@ -78,19 +107,18 @@ button:active,label.b:active{opacity:.8}
 label.b{display:block;background:transparent;color:var(--fg);border:1px dashed var(--mut);padding:18px}
 #f{display:none}
 #s{width:100%;margin-top:14px}
-#m{display:block;color:var(--mut);font-size:14px;margin-top:10px;min-height:1.2em}
+#m,#nm{display:block;color:var(--mut);font-size:14px;margin-top:10px;min-height:1.2em}
 canvas{width:100%;display:block;border-radius:10px;border:1px solid var(--ln);touch-action:none;background:#fff}
 input[type=range]{width:100%;accent-color:var(--ac);margin:14px 0 4px}
 .hint{color:var(--mut);font-size:13px;margin:6px 0 0}
 .opt{display:flex;align-items:center;gap:10px;margin:12px 0 0}
 .opt input[type=range]{margin:0;flex:1}
 #pv{margin-top:12px}
-#t{width:100%;margin-top:8px;background:transparent;color:var(--fg);border:1px solid var(--ln)}
 </style></head><body><main>
 <header><i></i><h1>Supercon Badge</h1></header>
-<section><h2>Name</h2><p class=cur>%NAME%</p>
-<form method=POST action=/ class=row><input type=text name=name maxlength=%MAX% placeholder='Your name' autocomplete=off>
-<button>Set</button></form></section>
+<section><h2>Name</h2><p class=cur id=cur>%NAME%</p>
+<form id=nf method=POST action=/ class=row><input id=ni type=text name=name maxlength=%MAX% placeholder='Your name' autocomplete=off>
+<button>Set</button></form><span id=nm></span></section>
 <section><h2>Photo</h2>
 <label class=b for=f>Choose a photo</label>
 <input type=file id=f accept='image/*,.heic,.heif'><span id=m></span>
@@ -103,8 +131,7 @@ input[type=range]{width:100%;accent-color:var(--ac);margin:14px 0 4px}
 <canvas id=pv width=960 height=%H%></canvas>
 <p class=hint>Preview of what the badge will show.</p>
 <button id=s>Send to badge</button>
-</div>
-<button id=t>Send colour test pattern</button></section></main>
+</div></section></main>
 <script>
 var W=960,H=%H%,P=W/2,Q=H/2,img,sc,mn,ox,oy,d=null;
 var f=document.getElementById('f'),c=document.getElementById('c'),x=c.getContext('2d'),
@@ -135,7 +162,7 @@ c.onpointermove=function(e){if(!d)return;var k=P/c.getBoundingClientRect().width
 c.onpointerup=function(){d=null;};
 var rc=document.getElementById('rc'),rs=document.getElementById('rs'),
 pvx=document.getElementById('pv').getContext('2d'),tm;
-/* Colours as the panel shows them. White/red are estimates: tune from the test pattern. */
+/* Colours as the panel shows them (white/red are estimates; tune by eye). */
 var PAL=[[255,255,255],[0,0,0],[200,30,30]];
 /* Error-diffusion dither of RGBA bytes p to white/black(/red). Returns the two planes
    (black then red, 1 bit/px, MSB first, never both set) plus a preview ImageData. */
@@ -161,24 +188,28 @@ function crop(){var o=document.createElement('canvas');o.width=W;o.height=H;var 
  g.fillStyle='#fff';g.fillRect(0,0,W,H);
  g.drawImage(img,ox*2,oy*2,img.width*sc*2,img.height*sc*2);return g.getImageData(0,0,W,H).data;}
 function run(){return dither(crop(),rc.checked,Math.pow(2,(50-rs.value)/25));}
-/* White, black and red patches plus white-black, white-red and black-red gradients. */
-function pattern(){var o=document.createElement('canvas');o.width=W;o.height=H;var g=o.getContext('2d'),i,gr,
- cs=['rgb(255,255,255)','rgb(0,0,0)','rgb('+PAL[2].join(',')+')'],pa=[[0,1],[0,2],[1,2]];
- g.fillStyle=cs[0];g.fillRect(0,0,W,H);
- for(i=0;i<3;i++){g.fillStyle=cs[i];g.fillRect(i*W/3,0,W/3,H/4);}
- for(i=0;i<3;i++){gr=g.createLinearGradient(0,0,W,0);gr.addColorStop(0,cs[pa[i][0]]);
-  gr.addColorStop(1,cs[pa[i][1]]);g.fillStyle=gr;g.fillRect(0,H/4*(i+1),W,H/4);}
- return g.getImageData(0,0,W,H).data;}
 function prev(){clearTimeout(tm);tm=setTimeout(function(){if(img)pvx.putImageData(run().pv,0,0);},250);}
-function send(r){m.textContent='Sending...';
- fetch('/photo',{method:'POST',body:r.red?r.out:r.out.subarray(0,W*H/8),
-  headers:{'Content-Type':'application/octet-stream'}})
- .then(function(a){return a.text();}).then(function(t){m.textContent=t;})
- .catch(function(){m.textContent='Failed';});}
+var sb=document.getElementById('s');
+/* Put the photo form back to its starting state after a successful upload. */
+function reset(){document.getElementById('ed').style.display='none';f.value='';img=null;
+ z.value=0;rc.checked=false;rs.value=50;clearTimeout(tm);pvx.clearRect(0,0,W,H);x.clearRect(0,0,P,Q);}
+/* Resolves to [status, text]. The badge answers 503 + a wait message while it is busy. */
+function post(url,body,hdr){return fetch(url,{method:'POST',body:body,headers:hdr||{}})
+ .then(function(a){return a.text().then(function(t){return[a.status,t];});});}
+function send(r){m.textContent='Sending...';sb.disabled=true;
+ post('/photo',r.red?r.out:r.out.subarray(0,W*H/8),{'Content-Type':'application/octet-stream'})
+ .then(function(a){if(a[0]==200){reset();m.textContent='Sent! The panel is refreshing and takes a while.';}
+  else m.textContent=a[1];})
+ .catch(function(){m.textContent='Could not reach the badge.';})
+ .then(function(){sb.disabled=false;});}
 rc.onchange=rs.oninput=prev;
-document.getElementById('s').onclick=function(){send(run());};
-document.getElementById('t').onclick=function(){m.textContent='Building test pattern...';
- setTimeout(function(){var r=dither(pattern(),true,1);pvx.putImageData(r.pv,0,0);send(r);},20);};
+sb.onclick=function(){send(run());};
+var nf=document.getElementById('nf'),nm=document.getElementById('nm'),cur=document.getElementById('cur');
+nf.onsubmit=function(ev){ev.preventDefault();nm.textContent='Sending...';
+ post('/',new URLSearchParams({name:document.getElementById('ni').value}))
+ .then(function(a){if(a[0]==200){cur.textContent=a[1];nf.reset();nm.textContent='Name sent.';}
+  else nm.textContent=a[1];})
+ .catch(function(){nm.textContent='Could not reach the badge.';});};
 </script></body></html>"""
 
 
@@ -219,6 +250,9 @@ class WebNametagApp(BaseApp):
         # bytearray of PHOTO_BYTES (black only) or 2*PHOTO_BYTES (black then red) in photo mode
         self._photo = None
         self._need_full = False
+        self._receiving = False  # a /photo body is being read
+        self._last_run_ms = None  # when run() last executed (None = never)
+        self._led_state = None  # last LED state applied ("red", "green", "orange", "off")
         self._wifi_on = False
         self._connect_start = 0
         self._sta = None
@@ -290,6 +324,53 @@ class WebNametagApp(BaseApp):
             self.status = "Connecting..."
             self._connect_start = time.ticks_ms()
 
+    # ---- Busy tracking and LEDs ----------------------------------------
+    def _active(self):
+        """Is the app on screen? run() only executes while it is selected."""
+        if self._last_run_ms is None:
+            return False
+        return time.ticks_diff(time.ticks_ms(), self._last_run_ms) < ACTIVE_WINDOW_MS
+
+    def _display_busy(self):
+        # epd.update() sets _framebuffer_ready and epd.run() clears it only after the
+        # whole refresh, so it covers the refresh itself. is_done_updating() alone has a
+        # gap of up to 100 ms between update() and the refresh starting.
+        return display._framebuffer_ready.is_set() or not display.is_done_updating()
+
+    def _busy(self):
+        """Is a submission being deployed right now? New submissions are rejected then."""
+        if self._receiving or self._display_busy():
+            return True
+        # Pending redraw only counts while we're on screen: run() is what clears it.
+        # While away, a submission is just stored and drawn on re-entry.
+        return self._active() and (
+            self._need_full or self._drawn != (self.status, self.ip, self.name_text)
+        )
+
+    def _led_wanted(self):
+        if self.status in _FAILED_STATUSES:
+            return "red"
+        if self.status == "WiFi off":
+            return "off"
+        if self.status == "Connecting..." or self._busy():
+            return "orange"
+        return "green"  # Connected and idle
+
+    def _update_leds(self):
+        want = self._led_wanted()
+        if want == self._led_state:
+            return
+        self._led_state = want
+        try:
+            if want == "orange":
+                leds.unpause()  # the launcher's menu pauses the sequencer and never resumes it
+                leds.set_sequence(_chase)
+            else:
+                leds.clear_sequence()
+                leds.fill(_LED_FILL[want])
+        except Exception as ex:
+            sys.print_exception(ex)
+
     # ---- HTTP server ---------------------------------------------------
     async def _start_server(self):
         try:
@@ -316,6 +397,15 @@ class WebNametagApp(BaseApp):
             got += len(chunk)
         return buf
 
+    async def _drain(self, reader, n):
+        """Read and discard a request body so the client sees our reply, not a reset."""
+        n = min(n, 2 * PHOTO_BYTES)
+        while n > 0:
+            chunk = await aio.wait_for(reader.read(min(2048, n)), 5)
+            if not chunk:
+                break
+            n -= len(chunk)
+
     async def _handle(self, reader, writer):
         try:
             line = await aio.wait_for(reader.readline(), 5)
@@ -329,16 +419,33 @@ class WebNametagApp(BaseApp):
                     break
                 if h.lower().startswith(b"content-length:"):
                     clen = int(h.split(b":", 1)[1])
-            if method == b"POST" and path == b"/photo":
+            if method == b"POST" and self._busy():
+                # Still deploying the previous submission: reject, never queue.
+                await self._drain(reader, clen)
+                print("webnametag: rejected POST, busy")
+                writer.write(
+                    b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n"
+                    b"Content-Type: text/plain\r\nConnection: close\r\n\r\n"
+                    b"Badge is busy updating its display. Wait a few seconds and try again."
+                )
+            elif method == b"POST" and path == b"/photo":
                 if clen not in (PHOTO_BYTES, 2 * PHOTO_BYTES):
-                    msg = b"Bad photo size"
-                    writer.write(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n" + msg)
+                    writer.write(
+                        b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n"
+                        b"Connection: close\r\n\r\nBad photo size"
+                    )
                 else:
-                    self._photo = None
-                    gc.collect()
-                    self._photo = await self._recv_photo(reader, clen)
-                    self.mode = "photo"
-                    self._need_full = True
+                    # No await between the _busy() check above and this flag, so two
+                    # requests can never both pass the check.
+                    self._receiving = True
+                    try:
+                        self._photo = None
+                        gc.collect()
+                        self._photo = await self._recv_photo(reader, clen)
+                        self.mode = "photo"
+                        self._need_full = True
+                    finally:
+                        self._receiving = False
                     print("webnametag: photo received")
                     writer.write(
                         b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
@@ -354,7 +461,11 @@ class WebNametagApp(BaseApp):
                     self.mode = "name"
                     self._photo = None
                     self._need_full = True
-                writer.write(b"HTTP/1.1 303 See Other\r\nLocation: /\r\nConnection: close\r\n\r\n")
+                # The page shows this as the current name.
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
+                    + self.name_text.encode()
+                )
             else:
                 page = (
                     _PAGE.replace("%NAME%", _escape(self.name_text))
@@ -458,12 +569,14 @@ class WebNametagApp(BaseApp):
     def run(self):
         # The display is only touched from here, and run() only executes while
         # this app is selected, so a name or photo submitted while away is drawn on re-entry.
+        self._last_run_ms = time.ticks_ms()
         if self.launched:
             if not self._built:
                 self._build_screen()
             if not self._wifi_on:  # first launch, or retry after "Failed"/"WiFi off"
                 self._wifi_enable()
             self._need_full = True  # draw below, once the panel is idle
+            self._led_state = None  # the launcher blanked the LEDs; re-apply ours
             return
 
         if UserA.pressed() or UserB.pressed():
@@ -473,11 +586,12 @@ class WebNametagApp(BaseApp):
                 self._wifi_enable()
 
         self._poll_wifi()
+        self._update_leds()
 
         # epd.run() clears its "update requested" flag when a refresh finishes, so a
         # display.update() made mid-refresh would be lost. Only draw when idle;
         # anything still dirty is retried on the next tick.
-        if not display.is_done_updating():
+        if self._display_busy():
             return
 
         if self._need_full:
