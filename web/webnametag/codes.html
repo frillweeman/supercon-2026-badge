@@ -1,0 +1,26 @@
+<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1,viewport-fit=cover'>
+<meta name=color-scheme content='light dark'><title>Badge Codes</title><link rel=icon href=data:,>
+<link rel=stylesheet href=style.css?v=6></head><body><main>
+<header><i id=dot></i><div><h1>Badge Codes</h1><p>QR codes &amp; barcodes &middot; <a href=./ style='color:inherit'>Nametag</a></p></div></header>
+<section id=bsec><h2>Badge</h2><p class='cur e' id=bn>Not connected</p>
+<form class=row style='margin-top:12px'><button id=cb type=button>Connect</button></form>
+<p class=hint id=ch style='margin-top:10px'></p></section>
+<section><h2>Code</h2>
+<label class=f for=fmt>Type</label><select id=fmt>
+<option value=qrcode>QR code</option><option value=pdf417>PDF417</option><option value=datamatrix>Data Matrix</option>
+<option value=azteccode>Aztec</option><option value=code128>Code 128</option><option value=code39>Code 39</option>
+<option value=ean13>EAN-13</option><option value=ean8>EAN-8</option><option value=upca>UPC-A</option>
+<option value=interleaved2of5>Interleaved 2 of 5</option></select>
+<label class=f for=txt>Content</label><input id=txt type=text value='https://example.com' autocomplete=off autocapitalize=off spellcheck=false>
+<div id=ecw><label class=f for=ec>Error correction</label><select id=ec></select></div>
+<label class=f for=sz>Size: <b id=szv></b></label><input id=sz type=range min=1 max=1 value=1></section>
+<section data-gate><h2>Preview (what the badge shows)</h2><canvas id=cv width=960 height=672></canvas>
+<p id=msg role=status></p><button id=go type=button style='width:100%;margin-top:12px'>Send to badge</button>
+<p class=hint>The panel takes several seconds to refresh.</p></section>
+<section id=dbs><details><summary class=hint>Debug log</summary>
+<pre id=dbg style='font:12px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all;max-height:45vh;overflow:auto;user-select:text;-webkit-user-select:text;margin:10px 0'></pre>
+<button type=button id=dbc class=g>Copy log</button></details></section></main>
+<div id=ov><div role=alertdialog aria-modal=true><p id=ovt></p><button id=ovb>OK</button></div></div>
+<div id=toast role=status></div>
+<script src=bwip.js></script><script src=ble.js?v=6></script><script src=codes.js?v=6></script></body></html>

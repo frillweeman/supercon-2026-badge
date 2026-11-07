@@ -10,9 +10,9 @@ AppleScript, and writes the slide state back to STATE_UUID.
   answers, GPIO1 of any SAO port = B1 and GPIO2 = B2 (custom commands, not slide control; active high, low at rest, internal pull-downs);
   if not, the SAO is ignored. (I2C is shared, so it can't tell which port the SAO is in.)
 
-The e-paper is never touched on launch (like webnametag, which waits for WiFi before its
-first draw): it is written only once a Mac is connected AND has a Keynote document open,
-and again only if that document changes. Disconnecting does not redraw.
+The e-paper is NEVER written by this app, so it keeps whatever image was last on it.
+The app also locks the launcher (lock_menu = True): the menu buttons do nothing, so the
+badge stays in presentation mode until the MCU is reset.
 
 LED bar: orange chase (webnametag's loading bar) until ready; solid green = ready and
 idle (green is used for nothing else). While presenting, slide position is one bright LED
@@ -39,16 +39,13 @@ import sys
 import time
 
 import bluetooth
-import lvgl
 from machine import I2C, Pin
 
 from apps.base_app import BaseApp
 from lib.button import UserA, UserB
-from lib.epd import display
 from lib.led_bar import NUM_LEDS, leds
 
-# Reuse webnametag's LVGL box + display-busy helpers (unbound, so its app class is not
-# imported into this namespace and the launcher does not instantiate it twice).
+# Reuse webnametag's LED chase sequence (module import only; nothing is drawn).
 from apps import webnametag as _wn
 
 SVC_UUID = bluetooth.UUID("9f1c0001-4b1d-4e6f-8a52-4b6579524d31")
@@ -66,11 +63,6 @@ _SAO_ADDR = 0x50  # Root Access SAO (I2C slave)
 _SAO_PORTS = ((2, 42), (4, 5), (7, 6))  # (GPIO1, GPIO2) of SAO1..3, see lib/sao.py
 _SAO_CMDS = (b"1", b"2")  # SAO GPIO1 = B1, GPIO2 = B2 (custom commands, handled by the bridge)
 
-_WHITE = lvgl.color_hex(0xFFFFFF)
-_BLACK = lvgl.color_hex(0x000000)
-_RED = lvgl.color_hex(0xFF0000)
-F_BODY = lvgl.font_montserrat_24
-F_BIG = lvgl.font_montserrat_48
 _DIM = (0, 0, 1)  # an existing, non-current slide (1 is the lowest non-zero level)
 _OFF = (0, 0, 0)  # no slide here (past the end of the deck)
 _LAP_COLORS = ((0, 4, 14), (12, 0, 8), (8, 8, 8))  # blue, magenta, white
@@ -87,6 +79,8 @@ def _scan_resp():
 
 
 class KeynoteApp(BaseApp):
+    lock_menu = True  # app_switcher ignores MenuPlus/MenuMinus while this app runs
+
     def __init__(self, name: str | None = None) -> None:
         self.name = "Keynote Remote"
         self.sleep_ms = 50
@@ -102,9 +96,6 @@ class KeynoteApp(BaseApp):
         # Latest state from the Mac: (playing, current, total)
         self._state = (0, 0, 0)
         self._doc = ""
-        self._drawn = None
-        self._scr = None
-        self._boxes = []
         self._led_key = None
         self._sao_pins = []
         self._sao_prev = []
@@ -231,54 +222,13 @@ class KeynoteApp(BaseApp):
     def on_exit(self):
         """Called by the launcher when the user leaves this app for the menu."""
         self._stop_ble()
-        self._drawn = None
         self._led_key = None
 
-    # ---- Display ---------------------------------------------------------
     def _view(self):
-        """What the screen should show, or None until a Mac is connected with a Keynote
-        document open (nothing is drawn then). Slide changes deliberately do not change this."""
+        """None until a Mac is connected with a Keynote document open (drives the LEDs only)."""
         if self._conn is None or not self._doc:
             return None
         return self._doc
-
-    def _display_busy(self):
-        return _wn.WebNametagApp._display_busy(self)
-
-    def _box(self, parent, x, y, w, h, font, color, text):
-        _wn.WebNametagApp._box(self, parent, x, y, w, h, font, color, _BLACK, text)
-
-    def _redraw(self, doc):
-        display.clear()
-        display.black.fill(1)  # black background; text boxes below are white/red on black
-        old = self._scr
-        scr = lvgl.obj()
-        scr.remove_style_all()
-        scr.set_size(lvgl.pct(100), lvgl.pct(100))
-        scr.set_style_bg_opa(lvgl.OPA.TRANSP, 0)
-        self._boxes = []
-        self._box(scr, 180, 60, 600, 60, F_BIG, _RED, "Keynote Remote")
-        self._box(scr, 130, 170, 700, 40, F_BODY, _WHITE, "Connected to Mac")
-        self._box(scr, 130, 220, 700, 60, F_BIG, _WHITE, doc)
-        self._box(scr, 130, 320, 700, 40, F_BODY, _WHITE, "LED bar = slide position (new colour each lap of 8)")
-        self._box(scr, 130, 440, 700, 40, F_BODY, _WHITE, "Left Button starts the show.")
-        self._box(scr, 24, 580, 300, 40, F_BODY, _WHITE, "Left Btn: Next")
-        self._box(scr, 636, 580, 300, 40, F_BODY, _WHITE, "Right Btn: Prev")
-        self._scr = scr
-        lvgl.screen_load(scr)
-        if old is not None:
-            try:
-                old.delete()
-            except Exception as ex:
-                print("keynote: old screen delete failed", ex)
-        scr.update_layout()
-        display.lv_display.inv_p = 0  # screen_load dirtied everything; paint only our boxes
-        for b in self._boxes:
-            b.invalidate()
-        lvgl.refr_now(display.lv_display)
-        display.update()
-        self._drawn = doc
-        gc.collect()
 
     def _leds(self):
         """Loading chase until a Mac is connected with a Keynote document; then solid green
@@ -320,7 +270,6 @@ class KeynoteApp(BaseApp):
             except Exception as ex:
                 print("keynote: ble start failed")
                 sys.print_exception(ex)
-            self._drawn = None
             self._led_key = None
             self._detect_sao()
             self._leds()
@@ -334,9 +283,3 @@ class KeynoteApp(BaseApp):
         self._apply_root()
 
         self._leds()
-        view = self._view()
-        if view is not None and view != self._drawn:
-            # epd.run() drops an update() requested mid-refresh, so only draw when idle.
-            # A newer state simply replaces this one on the next tick.
-            if not self._display_busy():
-                self._redraw(view)

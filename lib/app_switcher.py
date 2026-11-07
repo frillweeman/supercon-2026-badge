@@ -100,7 +100,11 @@ class AppSwitcher:
                     self.selecting_mode = False
                 await aio.sleep_ms(10)
             else:
-                if MenuMinus.pressed() or MenuPlus.pressed():
+                if getattr(self.apps[self.active_idx], "lock_menu", False):
+                    # Locked app (e.g. Keynote Remote): menu buttons are ignored; reset the MCU to leave.
+                    MenuMinus._pressed_state = PRESSED_READ
+                    MenuPlus._pressed_state = PRESSED_READ
+                elif MenuMinus.pressed() or MenuPlus.pressed():
                     self.selection_idx = self.active_idx
                     self.selecting_mode = True
                     # Optional hook so apps can release radios etc. when leaving.

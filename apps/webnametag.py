@@ -3,19 +3,19 @@ browser such as Bluefy on iPhone) connects to the badge, and shows a typed name 
 photo on the panel. No WiFi is used.
 
 UserA toggles Bluetooth; UserB resets the screen to the generated home graphic (which also
-clears any name/photo and picks a NEW pairing code). Nothing is persisted.
+clears any name/photo). Nothing is persisted. Two pages talk to it through the same GATT
+service (web/webnametag/): index.html (name + photo) and codes.html (QR codes / barcodes,
+sent as a 1-bit photo).
 
 Identity: the badge advertises as "Badge-<BLE_NAME>" (BLE_NAME from data/webnametag_config.py),
 or "Badge-<last 2 MAC bytes>" if unset, so several badges are told apart in the browser's chooser.
-The home graphic shows the page URL (text + QR), the advertised name and a random 4-digit pairing
-code. The page must send that code first (AUTH); until then every other write is refused. Three
-wrong codes disconnect and lock out for 10 s. This keeps neighbours from overwriting the nametag;
-it is not strong security.
+The home graphic shows the page URL (text + QR) and the advertised name. There is no
+authentication: anyone in BLE range can connect (one phone at a time).
 
 GATT (one 128-bit service, see UUIDs below; the page, web/webnametag/app.js, mirrors them):
-  CTRL   write           b"A"+code | b"N"+name | b"P"+planes(1|2) | b"D"+bytes | b"S" (sync) | b"E" (end photo)
+  CTRL   write           b"N"+name | b"P"+planes(1|2) | b"D"+bytes | b"S" (sync) | b"E" (end photo)
   DATA   (unused; stalled writes under Bluefy. Photo bytes now go in CTRL as b"D"+bytes)
-  STATUS read + notify   authed, busy, mode, ev (1 byte each), chunk (u16), arg (u32), then the name.
+  STATUS read + notify   busy, mode, ev (1 byte each), chunk (u16), arg (u32), then the name.
                          ev != 0 is a one-shot event (see EV_*); arg is the received byte count for EV_ACK.
 A photo is sent as P, then D windows of <= 3840 bytes each followed by S (the badge answers with
 EV_ACK and its byte count, so the sender never runs far ahead), then E. Body =
@@ -29,7 +29,6 @@ refreshing) new commands get EV_BUSY; nothing is queued.
 """
 
 import gc
-import os
 import struct
 import sys
 import time
@@ -61,12 +60,9 @@ _CTRL = bluetooth.UUID("7b1f0002-5c0e-4b6e-9a3d-5e11c0de0001")
 _DATA = bluetooth.UUID("7b1f0003-5c0e-4b6e-9a3d-5e11c0de0001")
 _STAT = bluetooth.UUID("7b1f0004-5c0e-4b6e-9a3d-5e11c0de0001")
 _IRQ_CONNECT, _IRQ_DISCONNECT, _IRQ_WRITE, _IRQ_MTU = 1, 2, 3, 21
-EV_AUTH_OK, EV_AUTH_BAD, EV_PH_READY, EV_PH_OK, EV_PH_ERR = 1, 2, 3, 4, 5
-EV_LOCKED, EV_BUSY, EV_NAME_OK, EV_ACK, EV_NEED_AUTH = 6, 7, 8, 9, 10
+EV_PH_READY, EV_PH_OK, EV_PH_ERR, EV_BUSY, EV_NAME_OK, EV_ACK = 1, 2, 3, 4, 5, 6
 _MODE_IDX = {"home": 0, "name": 1, "photo": 2}
 DATA_BUF = 4096
-MAX_BAD_CODES = 3
-LOCKOUT_MS = 10000
 RX_TIMEOUT_MS = 10000
 
 MAX_NAME = 24
@@ -180,11 +176,7 @@ class WebNametagApp(BaseApp):
         self._ble = None
         self._h_ctrl = self._h_data = self._h_stat = 0
         self._adv_name = self._make_adv_name()
-        self._code = ""  # current 4-digit pairing code
         self._conn = None
-        self._authed = False
-        self._bad = 0
-        self._lock_until = None  # ticks_ms until which AUTH is refused
         self._mtu = 23
         self._receiving = False  # a photo is being received
         self._buf = None  # photo bytes received so far
@@ -200,9 +192,6 @@ class WebNametagApp(BaseApp):
 
         suffix = _ascii(BLE_NAME.encode())[:18] if BLE_NAME else "%02X%02X" % tuple(machine.unique_id()[-2:])
         return "Badge-" + suffix
-
-    def _new_code(self):
-        self._code = "%04d" % (int.from_bytes(os.urandom(2), "big") % 10000)
 
     def _ble_enable(self):
         gc.collect()
@@ -227,9 +216,7 @@ class WebNametagApp(BaseApp):
             ble.gatts_set_buffer(self._h_ctrl, 256)  # fits b"D" + a 180-byte photo chunk
             ble.gatts_set_buffer(self._h_data, DATA_BUF, True)  # append: bursts are not lost
             ble.gatts_set_buffer(self._h_stat, 64)
-            self._new_code()
             self._conn = None
-            self._authed = False
             self.status = "Ready"
             self._stat_key = None
             self._advertise()
@@ -254,7 +241,6 @@ class WebNametagApp(BaseApp):
         except Exception as ex:
             sys.print_exception(ex)
         self._conn = None
-        self._authed = False
         self._abort_rx()
         self.status = "BLE off"
         gc.collect()
@@ -275,7 +261,7 @@ class WebNametagApp(BaseApp):
 
     def _status_bytes(self, ev=0, arg=0):
         hdr = struct.pack(
-            ">BBBBHI", int(self._authed), int(self._busy()), _MODE_IDX[self.mode], ev, self._chunk(), arg
+            ">BBBHI", int(self._busy()), _MODE_IDX[self.mode], ev, self._chunk(), arg
         )
         return hdr
 
@@ -293,7 +279,7 @@ class WebNametagApp(BaseApp):
         """Keep the readable STATUS fresh (busy/mode/name change from run(), not from IRQs)."""
         if self.status != "Ready":
             return
-        key = (self._authed, self._busy(), self.mode, self.name_text, self._chunk())
+        key = (self._busy(), self.mode, self.name_text, self._chunk())
         if key != self._stat_key:
             self._stat_key = key
             self._publish()
@@ -303,13 +289,10 @@ class WebNametagApp(BaseApp):
             if event == _IRQ_CONNECT:
                 print("webnametag: connect")
                 self._conn = data[0]
-                self._authed = False
-                self._bad = 0
                 self._stat_key = None
             elif event == _IRQ_DISCONNECT:
                 print("webnametag: disconnect (rx %d/%d)" % (self._got, self._total))
                 self._conn = None
-                self._authed = False
                 self._mtu = 23
                 self._abort_rx()
                 self._stat_key = None
@@ -329,33 +312,12 @@ class WebNametagApp(BaseApp):
             print("webnametag: irq error")
             sys.print_exception(ex)
 
-    def _locked(self):
-        return self._lock_until is not None and time.ticks_diff(self._lock_until, time.ticks_ms()) > 0
-
     def _on_ctrl(self, msg):
         op = msg[:1]
         if op == b"D":  # photo bytes (acknowledged write; the DATA characteristic is unused)
-            if self._authed:
-                self._on_data(memoryview(msg)[1:])
+            self._on_data(memoryview(msg)[1:])
             return
-        print("webnametag: ctrl", op, len(msg), "authed" if self._authed else "locked-out" if self._locked() else "unauthed")
-        if op == b"A":
-            if self._locked():
-                return self._publish(EV_LOCKED)
-            if msg[1:] == self._code.encode():
-                self._authed = True
-                self._bad = 0
-                self._stat_key = None
-                return self._publish(EV_AUTH_OK)
-            self._bad += 1
-            if self._bad >= MAX_BAD_CODES:
-                self._lock_until = time.ticks_add(time.ticks_ms(), LOCKOUT_MS)
-                self._publish(EV_LOCKED)
-                self._ble.gap_disconnect(self._conn)
-                return
-            return self._publish(EV_AUTH_BAD)
-        if not self._authed:
-            return self._publish(EV_NEED_AUTH)
+        print("webnametag: ctrl", op, len(msg))
         if op == b"N":
             if self._busy():
                 return self._publish(EV_BUSY)
@@ -400,7 +362,7 @@ class WebNametagApp(BaseApp):
             return self._publish(EV_PH_OK if ok else EV_PH_ERR)
 
     def _on_data(self, d):
-        if not (self._authed and self._receiving and self._buf is not None):
+        if not (self._receiving and self._buf is not None):
             return
         n = len(d)
         if self._got == 0:
@@ -426,10 +388,10 @@ class WebNametagApp(BaseApp):
         return display._framebuffer_ready.is_set() or not display.is_done_updating()
 
     def _key(self):
-        return (self.mode, self.name_text, (self.status, self._code) if self.mode == "home" else None)
+        return (self.mode, self.name_text, self.status if self.mode == "home" else None)
 
     def _pending(self):
-        """A redraw is due (new content, reset, or Bluetooth state/code changed on home)."""
+        """A redraw is due (new content, reset, or Bluetooth state changed on home)."""
         return self._need_full or self._drawn != self._key()
 
     def _busy(self):
@@ -509,9 +471,7 @@ class WebNametagApp(BaseApp):
             self._box(scr, cx, QR_Y, cw, 40, F_HEAD, _BLACK, _WHITE, "1. Open in Bluefy")
             self._box(scr, cx, QR_Y + 44, cw, 28, F_SMALL, _RED, _WHITE, url)
             self._box(scr, cx, QR_Y + 96, cw, 40, F_HEAD, _BLACK, _WHITE, "2. Tap Connect, pick")
-            self._box(scr, cx, QR_Y + 140, cw, 34, F_BODY, _RED, _WHITE, self._adv_name)
-            self._box(scr, cx, QR_Y + 196, cw, 40, F_HEAD, _BLACK, _WHITE, "3. Enter code")
-            self._box(scr, cx, QR_Y + 240, cw, 60, F_TITLE, _RED, _WHITE, self._code)
+            self._box(scr, cx, QR_Y + 140, cw, 60, F_TITLE, _RED, _WHITE, self._adv_name)
         else:
             cx, cw = 60, 960 - 24 - 60
             _frame(fb, cx, QR_Y, cw, 240)
@@ -520,7 +480,7 @@ class WebNametagApp(BaseApp):
             }.get(self.status, "Bluetooth is off\n\nPress Left Btn\nto turn it on")
             self._box(scr, cx + 10, QR_Y + 20, cw - 20, 200, F_BODY, _BLACK, _WHITE, msg)
         self._box(scr, cx, 560, cw, 60, F_SMALL, _BLACK, _WHITE,
-                  "Left Btn: Bluetooth on / off\nRight Btn: clear the screen, new code")
+                  "Left Btn: Bluetooth on / off\nRight Btn: clear the screen")
 
     def _redraw(self):
         """Clear the panel, draw the current content, refresh."""
@@ -584,8 +544,6 @@ class WebNametagApp(BaseApp):
             self.name_text = ""
             self._photo = None
             self._need_full = True
-            if self.status == "Ready":
-                self._new_code()  # a fresh code; an already-paired phone stays connected
 
         # A phone that vanished mid-upload must not wedge the badge in "busy".
         if self._receiving and time.ticks_diff(time.ticks_ms(), self._rx_ms) > RX_TIMEOUT_MS:
