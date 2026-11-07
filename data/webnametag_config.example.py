@@ -8,3 +8,10 @@ BLE_NAME = "Will"
 # Optional: where the web page is hosted (shown on the badge as text + QR). Default is the
 # GitHub Pages site for this repo.
 # PAGE_URL = "https://frillweeman.github.io/supercon-2026-badge/"
+
+# apps/wifinametag.py (the SoftAP version of the nametag) hosts its own WiFi access point instead
+# of using Bluetooth. The password is required (8-63 chars); without it that app shows "No config"
+# and never starts an open network.
+AP_SSID = "Badge-Name"
+AP_PASSWORD = "choose-a-password"
+AP_CHANNEL = 6
