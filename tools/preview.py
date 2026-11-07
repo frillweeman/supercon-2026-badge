@@ -29,7 +29,7 @@ class H(BaseHTTPRequestHandler):
             return self.reply(404, b"Not found")
         body = (WEB / name).read_bytes()
         if name == "index.html":  # inject the mock before app.js runs
-            body = body.replace(b"<script src=/app.js>", b"<script src=/mock_ble.js></script><script src=/app.js>")
+            body = body.replace(b"<script src=app.js>", b"<script src=mock_ble.js></script><script src=app.js>")
         self.reply(200, body, "text/html" if name.endswith(".html") else "application/javascript")
     def do_POST(self):
         n = int(self.headers["Content-Length"]); body = b""
