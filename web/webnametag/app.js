@@ -1,3 +1,13 @@
+/* ---- debug log (Bluefy has no console): shown under "Debug log" at the bottom of the page ---- */
+var LOG=[],T0=Date.now();
+function dbg(){var m=[].map.call(arguments,function(a){return a&&a.name&&a.message!==undefined?a.name+': '+a.message:
+ (a&&typeof a=='object'?JSON.stringify(a):String(a));}).join(' ');
+ LOG.push(((Date.now()-T0)/1000).toFixed(1)+' '+m);if(LOG.length>300)LOG.shift();
+ var e=document.getElementById('dbg');if(e)e.textContent=LOG.join('\n');}
+(function(){var o=console.log;console.log=function(){dbg.apply(null,arguments);o.apply(console,arguments);};})();
+window.addEventListener('error',function(e){dbg('JS error:',e.message,e.filename?(e.filename.split('/').pop()+':'+e.lineno):'');});
+window.addEventListener('unhandledrejection',function(e){dbg('Unhandled rejection:',e.reason);});
+dbg('page loaded',navigator.userAgent);
 var W=960,H=672,P=W/2,Q=H/2,img,sc,mn,ox,oy,d=null,tab='c',rc=true,dirty=true,last=null,busy=false,tm,tk,pt,pn=0,opener,fo;
 function $(i){return document.getElementById(i);}
 var f=$('f'),fc=$('fc'),c=$('c'),x=c.getContext('2d'),pv=$('pv'),pvx=pv.getContext('2d'),z=$('z'),rs=$('rs'),
@@ -34,17 +44,17 @@ var SVC='7b1f0001-5c0e-4b6e-9a3d-5e11c0de0001',U_CT='7b1f0002-5c0e-4b6e-9a3d-5e1
 function parse(v){return{authed:v.getUint8(0),busy:v.getUint8(1),mode:MODES[v.getUint8(2)]||'home',ev:v.getUint8(3),
  chunk:v.getUint16(4),arg:v.getUint32(6),name:v.byteLength>10?new TextDecoder().decode(new DataView(v.buffer,v.byteOffset+10)):''};}
 function rd(){return chS.readValue().then(function(v){var t=parse(v);if(t.chunk)chunk=Math.min(t.chunk,180);return t;});}
-function onst(e){var t=parse(e.target.value),i;if(t.chunk)chunk=Math.min(t.chunk,180);if(!t.ev)return;
+function onst(e){var t=parse(e.target.value),i;if(t.chunk)chunk=Math.min(t.chunk,180);if(!t.ev)return;dbg('badge event',t.ev,'arg',t.arg,'busy',t.busy,'chunk',t.chunk);
  for(i=0;i<wt.length;i++)if(wt[i].set.indexOf(t.ev)>=0){var w=wt.splice(i,1)[0];clearTimeout(w.t);w.ok(t);return;}}
 /* Register BEFORE writing: the notification can beat the write's own completion. */
 function wev(set,ms){return new Promise(function(ok,no){var w={set:set,ok:ok};
- w.t=setTimeout(function(){wt.splice(wt.indexOf(w),1);no(new Error('timeout'));},ms||8000);wt.push(w);});}
+ w.t=setTimeout(function(){wt.splice(wt.indexOf(w),1);dbg('timeout waiting for event',set);no(new Error('timeout'));},ms||8000);wt.push(w);});}
 /* DATA writes: no-response is fast, but if this browser rejects or stalls on it we fall back to acknowledged writes. */
 var nr=true;
 function dw(a){if(!nr)return chD.writeValueWithResponse(a);
- return chD.writeValueWithoutResponse(a).catch(function(e){console.log('no-response write failed, using acknowledged writes',e);nr=false;return chD.writeValueWithResponse(a);});}
+ return chD.writeValueWithoutResponse(a).catch(function(e){dbg('no-response DATA write failed, switching to acknowledged writes:',e);nr=false;return chD.writeValueWithResponse(a);});}
 function ctl(bytes){return chC.writeValueWithResponse(bytes);}
-function cmd(op,body){var a=new Uint8Array(1+(body?body.length:0));a[0]=op.charCodeAt(0);if(body)a.set(body,1);return ctl(a);}
+function cmd(op,body){dbg('cmd',op,body?body.length:0);var a=new Uint8Array(1+(body?body.length:0));a[0]=op.charCodeAt(0);if(body)a.set(body,1);return ctl(a);}
 /* Resolves to [status,text] like the old HTTP calls: 200 ok, 503 badge busy, other = error text. */
 function tx(kind,body,cb){
  if(kind=='name'){var w=wev([EV.NAME_OK,EV.BUSY,EV.NEED_AUTH]);
@@ -52,18 +62,18 @@ function tx(kind,body,cb){
    if(t.ev==EV.BUSY)return[503,'Badge is busy updating its display. Wait a few seconds and try again.'];
    if(t.ev==EV.NEED_AUTH)return[401,'Badge is locked. Enter the code again.'];
    return rd().then(function(s){return[200,s.name];});});}
- var n=body.length,planes=n/(W*H/8),sent=0,win=Math.max(chunk,Math.floor(3840/chunk)*chunk),w1=wev([EV.PH_READY,EV.BUSY,EV.NEED_AUTH]);
+ dbg('photo: start, bytes',body.length,'chunk',chunk,'noResp',nr);var n=body.length,planes=n/(W*H/8),sent=0,win=Math.max(chunk,Math.floor(3840/chunk)*chunk),w1=wev([EV.PH_READY,EV.BUSY,EV.NEED_AUTH]);
  return cmd('P',new Uint8Array([planes])).then(function(){return w1;}).then(function(t){
   if(t.ev==EV.BUSY)return[503,'Badge is busy updating its display. Wait a few seconds and try again.'];
   if(t.ev==EV.NEED_AUTH)return[401,'Badge is locked. Enter the code again.'];
   function win1(){if(sent>=n){var w3=wev([EV.PH_OK,EV.PH_ERR],15000);
     return cmd('E').then(function(){return w3;}).then(function(e){
      return e.ev==EV.PH_OK?[200,'ok']:[500,'The badge could not use that image. Try again.'];});}
-   var end=Math.min(n,sent+win),chain=Promise.resolve(),o;
+   var end=Math.min(n,sent+win),chain=Promise.resolve(),o;dbg('photo: window',sent,'->',end);
    for(o=sent;o<end;o+=chunk)(function(o){chain=chain.then(function(){
      return dw(body.subarray(o,Math.min(end,o+chunk)));});})(o);
    var w2=wev([EV.ACK,EV.NEED_AUTH],8000);
-   return chain.then(function(){return cmd('S');}).then(function(){return w2;}).then(function(a){
+   return chain.then(function(){dbg('photo: window written, syncing');return cmd('S');}).then(function(){return w2;}).then(function(a){
     if(a.ev!=EV.ACK||a.arg!=end)return[500,'Transfer got out of sync. Try again.'];
     sent=end;if(cb)cb(sent/n);return win1();});}
   return win1();});}
@@ -74,10 +84,10 @@ function rp(kind,body,cb,lb){return tx(kind,body,cb).catch(function(e){
  .then(function(){lb('Sending...');return tx(kind,body,cb);});});}
 /* ---- connect / pairing ---- */
 var bsec=$('bsec'),bn=$('bn'),cb=$('cb'),af=$('af'),ci=$('ci'),ch=$('ch');
-function gate(on){authed=on;[].forEach.call(document.querySelectorAll('main > section:not(#bsec)'),function(e){
+function gate(on){authed=on;[].forEach.call(document.querySelectorAll('main > section:not(#bsec):not(#dbs)'),function(e){
  e.style.opacity=on?'':'.4';if(on)e.removeAttribute('inert');else e.setAttribute('inert','');});}
 function bst(t,cls){bn.textContent=t;bn.className='cur'+(cls?' '+cls:'');}
-function lost(){console.log('badge link lost');wt.forEach(function(w){clearTimeout(w.t);});wt=[];gate(false);af.style.display='none';cb.style.display='';
+function lost(){dbg('badge link lost');wt.forEach(function(w){clearTimeout(w.t);});wt=[];gate(false);af.style.display='none';cb.style.display='';
  cb.textContent='Connect';cb.disabled=false;bst('Not connected','e');}
 function ckey(){return'code:'+(dev&&dev.name||'');}
 function unlock(code){var w=wev([EV.AUTH_OK,EV.AUTH_BAD,EV.LOCKED],6000);
@@ -89,16 +99,16 @@ function unlock(code){var w=wev([EV.AUTH_OK,EV.AUTH_BAD,EV.LOCKED],6000);
   return false;});}
 function connect(){
  if(!navigator.bluetooth){ch.textContent='This browser has no Web Bluetooth. On iPhone, open this page in the Bluefy browser.';return;}
- cb.disabled=true;cb.textContent='Choosing...';ch.textContent='';
+ dbg('connect: requestDevice');cb.disabled=true;cb.textContent='Choosing...';ch.textContent='';
  navigator.bluetooth.requestDevice({filters:[{services:[SVC]},{namePrefix:'Badge-'}],optionalServices:[SVC]}).then(function(d){
-  dev=d;cb.textContent='Connecting...';bst(d.name||'Badge','e');d.addEventListener('gattserverdisconnected',lost);return d.gatt.connect();})
- .then(function(g){return g.getPrimaryService(SVC);})
+  dev=d;dbg('connect: chose',d.name,'; gatt.connect');cb.textContent='Connecting...';bst(d.name||'Badge','e');d.addEventListener('gattserverdisconnected',lost);return d.gatt.connect();})
+ .then(function(g){dbg('connect: gatt up');return g.getPrimaryService(SVC);})
  .then(function(sv){return Promise.all([sv.getCharacteristic(U_CT),sv.getCharacteristic(U_DT),sv.getCharacteristic(U_ST)]);})
- .then(function(c){chC=c[0];chD=c[1];chS=c[2];chS.addEventListener('characteristicvaluechanged',onst);return chS.startNotifications();})
+ .then(function(c){chC=c[0];chD=c[1];chS=c[2];chS.addEventListener('characteristicvaluechanged',onst);dbg('connect: characteristics ok; starting notifications');return chS.startNotifications();})
  .then(rd).then(function(){var saved='';try{saved=localStorage.getItem(ckey())||'';}catch(e){}
   return saved?unlock(saved):false;})
  .then(function(ok){if(!ok){cb.style.display='none';af.style.display='flex';ci.value='';ci.focus();}})
- .catch(function(e){if(e&&e.name=='NotFoundError'){lost();return;}lost();ch.textContent='Could not connect: '+(e&&e.message||e);});}
+ .catch(function(e){dbg('connect failed:',e);if(e&&e.name=='NotFoundError'){lost();return;}lost();ch.textContent='Could not connect: '+(e&&e.message||e);});}
 cb.onclick=function(ev){ev.preventDefault();connect();};
 $('af').onsubmit=function(ev){ev.preventDefault();if(ci.value.length==4)unlock(ci.value).then(function(ok){if(!ok)ci.select();}).catch(function(){ch.textContent='No answer from the badge.';});};
 gate(false);lost();
@@ -107,7 +117,7 @@ function sendName(v){sn.disabled=cl.disabled=true;sn.textContent='Sending...';
  rp('name',v,null,function(t){sn.textContent=t;})
  .then(function(a){if(a[0]==200){curName=a[1];curMode='name';ni.value='';ni.blur();toast(a[1]?'Name sent.':'Name cleared.');watch();}
   else alertBox(a[1]);})
- .catch(function(e){alertBox('Could not reach the badge'+(e&&e.name?' ('+e.name+': '+(e.message||'')+')':'.'));})
+ .catch(function(e){dbg('send failed:',e);alertBox('Could not reach the badge'+(e&&e.name?' ('+e.name+': '+(e.message||'')+')':'.'));})
  .then(function(){sn.textContent='Set';show();});}
 $('nf').onsubmit=function(ev){ev.preventDefault();if(!sn.disabled)sendName(ni.value);};
 cl.onclick=function(){sendName('');};
@@ -185,7 +195,7 @@ ss.onclick=function(){if(busy||!img)return;if(tab=='c'){tabTo('p');return;}lock(
    function(t){ss.textContent=t;prog(-1);})
   .then(function(a){if(a[0]==200){reset();curMode='photo';show();toast('Sent! The panel takes a while to refresh.');watch();}
    else alertBox(a[1]);})
-  .catch(function(e){alertBox('Could not reach the badge'+(e&&e.name?' ('+e.name+': '+(e.message||'')+')':'.'));})
+  .catch(function(e){dbg('send failed:',e);alertBox('Could not reach the badge'+(e&&e.name?' ('+e.name+': '+(e.message||'')+')':'.'));})
   .then(function(){lock(false);});},40);};
 /* Escape closes the topmost layer; Tab stays inside it. */
 document.onkeydown=function(e){var ovo=$('ov').style.display=='flex';
@@ -198,3 +208,7 @@ document.onkeydown=function(e){var ovo=$('ov').style.display=='flex';
  if(e.shiftKey&&a<=0){l[l.length-1].focus();e.preventDefault();}
  else if(!e.shiftKey&&a==l.length-1){l[0].focus();e.preventDefault();}};
 setRed(true);
+
+$('dbc').onclick=function(){var t=LOG.join('\n');
+ (navigator.clipboard&&navigator.clipboard.writeText?navigator.clipboard.writeText(t):Promise.reject()).then(function(){toast('Log copied.');},
+  function(){var r=document.createRange();r.selectNodeContents($('dbg'));var g=getSelection();g.removeAllRanges();g.addRange(r);toast('Select and copy the log.');});};
