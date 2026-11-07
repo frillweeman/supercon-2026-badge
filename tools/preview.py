@@ -3,30 +3,18 @@ Host-side only (tools/ is not synced to the badge). Usage: tools/preview.py [por
 
 The mock mimics the badge: a submission keeps it "busy" for BUSY_S seconds, during which
 POSTs get 503 and GET /status reports busy. Uploads are read slowly so progress is visible."""
-import ast, json, sys, time
+import json, sys, time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-SRC = Path(__file__).resolve().parent.parent / "apps" / "webnametag.py"
-tree = ast.parse(SRC.open().read())
-consts = {}
-for n in tree.body:
-    if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name):
-        try: consts[n.targets[0].id] = ast.literal_eval(n.value)
-        except Exception: pass
-PAGE = consts["_PAGE"]
+WEB = Path(__file__).resolve().parent.parent / "data" / "webnametag"
 PHOTO_H = 672
 BUSY_S = 8
 state = {"name": "Ada Lovelace", "mode": "name", "busy_until": 0.0}
 
 def busy():
     return time.time() < state["busy_until"]
-
-def render():
-    return (PAGE.replace("%NAME%", state["name"]).replace("%HOST%", "willboard.local").replace("%MAX%", "24")
-            .replace("%H%", str(PHOTO_H)).replace("%QH%", str(PHOTO_H // 2))
-            .replace("%HEIC_URL%", consts["HEIC_URL"]).replace("%HEIC_SRI%", consts["HEIC_SRI"])).encode()
 
 class H(BaseHTTPRequestHandler):
     def reply(self, code, body, ctype="text/plain"):
@@ -35,7 +23,10 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/status"):
             return self.reply(200, json.dumps({"busy": int(busy()), "mode": state["mode"], "name": state["name"]}).encode(), "application/json")
-        self.reply(200, render(), "text/html")
+        name = {"/": "index.html", "/app.js": "app.js"}.get(self.path.split("?")[0])
+        if not name:
+            return self.reply(404, b"Not found")
+        self.reply(200, (WEB / name).read_bytes(), "text/html" if name.endswith(".html") else "application/javascript")
     def do_POST(self):
         n = int(self.headers["Content-Length"]); body = b""
         while len(body) < n:  # slow read so upload progress is visible

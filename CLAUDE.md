@@ -33,7 +33,7 @@ See "Open questions" at the bottom before relying on any [inferred] item.
 | `tools/` | Host-side scripts, **not synced to the badge**. `sync.py` pushes this dir to the badge (see below). |
 | `data/` | Assets and state: `gallery/` (44 PNGs), `graphics/` (10 PNGs), `schedule.csv`, `rendered_luts.py` (EPD waveform tables), `panel_config.json`, `user_apps.py`, `app_list`. |
 
-Built-in apps, in menu order: Gallery (`gallery.py`), Nametag (`nametag.py`), Workshops / Sat Talks / Sun Talks (all from `schedule.py`), Web Nametag (`webnametag.py`, last because it sorts last; it hosts a WiFi page to set the name). Default (index 0) is Gallery.
+Built-in apps, in menu order: Gallery (`gallery.py`), Nametag (`nametag.py`), Workshops / Sat Talks / Sun Talks (all from `schedule.py`), Web Nametag (`webnametag.py`, last because it sorts last; it hosts its own WiFi access point with a page to set a name or photo). Default (index 0) is Gallery.
 
 ## How apps work [code]
 
@@ -66,11 +66,19 @@ Creates, updates and deletes files on the badge so it matches this directory. Co
 - Listing the badge uses `mpremote exec`, which interrupts `main.py`'s tasks without resetting (boot counter is not bumped). Reset afterwards.
 - Writing to the badge still needs the owner's OK (see working rules): run the dry run, show the plan, then `--apply`.
 - Status: written and syntax-checked, **not yet run against the badge**.
-- `tools/preview.py [port]` serves the `webnametag` page locally (default 8080) with a mock badge backend, for browser/mobile styling checks. Host-side only; never synced.
+- `tools/preview.py [port]` serves `data/webnametag/` locally (default 8080) with a mock badge backend, for browser/mobile styling checks. Host-side only; never synced.
 - The tool is one-way. To pull the badge's state into this dir, use `mpremote fs cp -r : dump/` as before.
 
 Tooling lives in `~/.local/bin` (`mpremote`, `esptool`, `espefuse`, `espsecure`, `pyserial-miniterm`; installed with `uv tool`).
 The serial port is exclusive: only one program can hold `/dev/cu.usbmodem1101` at a time (a running `mpremote fs cp` blocks everything else).
+
+## Web Codes app (`apps/webcodes.py`) [code, untested on hardware]
+
+Badge hosts its own WiFi AP (`AP_SSID`/`AP_PASSWORD`/`AP_CHANNEL` in untracked `data/webnametag_config.py`; password 8+ chars or the app shows "No config"). Page = static files in `data/webcodes/` streamed from flash (`index.html`, `app.js`, vendored bwip-js as `bwip.js.gz`, sent with `Content-Encoding: gzip`). The browser encodes the code, adds caption/border and POSTs 1-bit planes to `/photo` (same format as webnametag). The AP has no internet, so never reference a CDN from that page. `lib/qr.py` now also does V3-L/V4-L for the WiFi-join QR (V2-M output unchanged). Not yet run on the badge or decoded with a reference scanner.
+
+## Web Nametag app (`apps/webnametag.py`) [code, untested on hardware]
+
+Converted from joining an existing WiFi (STA) to hosting its own SoftAP, same as Web Codes: same `AP_*` settings in `data/webnametag_config.py` (the old `SSID`/`PASSWORD`/`HOSTNAME` are ignored). Home screen shows the WiFi-join QR, credentials and `http://192.168.4.1`. The page is now static files `data/webnametag/index.html` + `app.js` streamed from flash (was an ~18 KB Python string built in RAM per request). The HEIC-converter CDN fallback was removed because the AP has no internet (Safari decodes HEIC itself; other browsers will say "Could not read that image"). Uploaded photos are still received into a RAM buffer (80 KB, 160 KB with red) before being copied to the framebuffers; receiving straight into the framebuffers would save that but the panel may be mid-refresh. Web Nametag and Web Codes both use the AP, so only turn one on at a time.
 
 ## Gotchas and oddities noticed [code]
 

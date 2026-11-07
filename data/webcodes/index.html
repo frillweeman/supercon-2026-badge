@@ -1,0 +1,54 @@
+<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1,viewport-fit=cover'>
+<meta name=color-scheme content='light dark'><title>Badge Codes</title>
+<style>
+:root{--bg:#f4f1ea;--card:#fff;--fg:#111;--mut:#666;--ln:#d6d1c4;--ac:#d4001a;--on:#fff;--ok:#1a9d4b}
+@media(prefers-color-scheme:dark){:root{--bg:#0b0b0c;--card:#17171a;--fg:#f2f2f2;--mut:#8d8d95;--ln:#2c2c31;--ac:#ff2b3f;--on:#0b0b0c;--ok:#3ccf70}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,sans-serif;
+padding:max(16px,env(safe-area-inset-top)) 16px max(32px,env(safe-area-inset-bottom))}
+main{max-width:560px;margin:auto}
+header{display:flex;align-items:center;gap:12px;margin:4px 2px 18px}
+#dot{width:12px;height:12px;border-radius:50%;background:var(--ok);flex:none}
+h1{font-size:17px;margin:0;font-weight:700}
+header p{margin:0;color:var(--mut);font-size:13px}
+section{background:var(--card);border:1px solid var(--ln);border-radius:14px;padding:18px;margin-bottom:14px}
+h2{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);margin:0 0 12px;font-weight:600}
+label{display:block;font-size:13px;color:var(--mut);margin:12px 0 4px}
+label.c{display:flex;align-items:center;gap:8px;margin:10px 0 0;color:var(--fg);font-size:15px}
+select,input[type=text]{width:100%;min-height:46px;font:inherit;font-size:16px;color:var(--fg);background:var(--bg);
+border:1px solid var(--ln);border-radius:10px;padding:0 12px}
+input[type=range]{width:100%;accent-color:var(--ac)}
+input[type=checkbox]{width:20px;height:20px;accent-color:var(--ac)}
+.row{display:flex;gap:10px}.row>*{flex:1;min-width:0}
+button{font:inherit;font-weight:600;min-height:46px;color:var(--on);background:var(--ac);border:0;border-radius:10px;padding:0 18px;cursor:pointer}
+button:disabled{opacity:.4}button.g{background:transparent;color:var(--fg);border:1px solid var(--ln)}
+canvas{width:100%;height:auto;display:block;border:1px solid var(--ln);border-radius:8px;background:#fff;image-rendering:pixelated}
+#msg{font-size:14px;margin:10px 0 0;min-height:20px;color:var(--mut)}#msg.e{color:var(--ac)}
+.hint{color:var(--mut);font-size:13px;margin:8px 0 0}
+</style></head><body><main>
+<header><i id=dot></i><div><h1>Badge Codes</h1><p>QR codes &amp; barcodes</p></div></header>
+<section><h2>Code</h2>
+<label for=fmt>Format</label><select id=fmt>
+<option value=qrcode>QR code</option><option value=pdf417>PDF417</option><option value=datamatrix>Data Matrix</option>
+<option value=azteccode>Aztec</option><option value=code128>Code 128</option><option value=code39>Code 39</option>
+<option value=ean13>EAN-13</option><option value=ean8>EAN-8</option><option value=upca>UPC-A</option>
+<option value=interleaved2of5>Interleaved 2 of 5</option></select>
+<label for=txt>Data</label><input id=txt type=text value='https://example.com' autocomplete=off autocapitalize=off spellcheck=false>
+<div id=ecw><label for=ec>Error correction</label><select id=ec></select></div>
+<label for=cap>Caption (under the code)</label><input id=cap type=text placeholder='Same as data' autocomplete=off>
+<div class=row><label class=c><input id=showcap type=checkbox checked>Show caption</label>
+<label class=c><input id=capred type=checkbox>Red caption</label></div>
+<label class=c><input id=rot type=checkbox>Rotate 90&deg;</label></section>
+<section><h2>Border (optional)</h2>
+<input id=bf type=file accept='image/png,image/*'>
+<p class=hint>A transparent PNG, stretched to the whole 960&times;672 screen. Opaque parts are drawn on top of the code.</p>
+<label for=bm>Colour of the border</label><select id=bm><option value=keep>Keep red / black as drawn</option>
+<option value=black>All black</option><option value=red>All red</option></select>
+<label for=ins>Keep the code this far from the edges: <b id=insv></b> px</label><input id=ins type=range min=0 max=200 value=40>
+<button id=bx type=button class=g style='margin-top:12px'>Remove border</button></section>
+<section><h2>Preview (what the badge shows)</h2><canvas id=pv width=960 height=672></canvas>
+<p id=msg role=status></p><button id=go type=button style='width:100%;margin-top:12px'>Send to badge</button>
+<p class=hint>The panel takes several seconds to refresh. Red text or borders are for decoration: scanners may not see red.</p></section>
+</main>
+<script src=/bwip.js></script><script src=/app.js></script></body></html>

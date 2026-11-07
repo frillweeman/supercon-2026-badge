@@ -1,14 +1,18 @@
-"""Tiny QR encoder for the badge: byte mode, version 2, error correction M, mask 0.
+"""Tiny QR encoder for the badge: byte mode, single block, mask 0.
 
-Holds up to 26 bytes (enough for "http://255.255.255.255"). make(text) returns a list of 25
-bytearrays (rows), each module 1 = dark. Pure Python, MicroPython-safe, ~50 ms on the ESP32-S3.
+make(text) picks the smallest of V2-M (<= 26 bytes, enough for "http://255.255.255.255"),
+V3-L (<= 53) or V4-L (<= 78) and returns a list of 25/29/33 bytearrays (rows), each module 1 = dark.
+V2-M output is unchanged from the original fixed encoder. Pure Python, MicroPython-safe, ~50 ms on the ESP32-S3.
 Follows the layout rules of the QR spec (same algorithm as Nayuki's reference encoder).
 """
 
-SIZE = 25
-DATA_CW = 28  # V2-M data codewords
-EC_CW = 16  # V2-M error correction codewords
-MAX_BYTES = 26
+# (version, ec format bits, data codewords, ec codewords, max bytes, alignment centre)
+_VARIANTS = (
+    (2, 0, 28, 16, 26, 18),  # V2-M
+    (3, 1, 55, 15, 53, 22),  # V3-L
+    (4, 1, 80, 20, 78, 26),  # V4-L
+)
+MAX_BYTES = 78
 
 
 def _mul(a, b):
@@ -23,7 +27,7 @@ def _mul(a, b):
     return r
 
 
-def _rs(data):
+def _rs(data, EC_CW):
     """Reed-Solomon remainder (EC_CW bytes) of the data codewords."""
     gen = [0] * (EC_CW - 1) + [1]
     root = 1
@@ -42,7 +46,7 @@ def _rs(data):
     return rem
 
 
-def _codewords(raw):
+def _codewords(raw, DATA_CW, EC_CW):
     bits = []
 
     def put(val, n):
@@ -66,15 +70,18 @@ def _codewords(raw):
     while len(data) < DATA_CW:
         data.append(pad)
         pad ^= 0xEC ^ 0x11
-    return data + _rs(data)
+    return data + _rs(data, EC_CW)
 
 
 def make(text):
     raw = text.encode()
     if len(raw) > MAX_BYTES:
         raise ValueError("QR text too long")
-    cw = _codewords(raw)
-    n = SIZE
+    for ver, ecbits, DATA_CW, EC_CW, cap, ac in _VARIANTS:
+        if len(raw) <= cap:
+            break
+    cw = _codewords(raw, DATA_CW, EC_CW)
+    n = 4 * ver + 17
     mod = [bytearray(n) for _ in range(n)]
     fn = [bytearray(n) for _ in range(n)]  # 1 = function module (not data)
 
@@ -90,15 +97,16 @@ def make(text):
         for dy in range(-4, 5):
             for dx in range(-4, 5):
                 setf(cx + dx, cy + dy, max(abs(dx), abs(dy)) not in (2, 4))
-    for dy in range(-2, 3):  # alignment pattern at (18, 18)
+    for dy in range(-2, 3):  # alignment pattern at (ac, ac)
         for dx in range(-2, 3):
-            setf(18 + dx, 18 + dy, max(abs(dx), abs(dy)) != 1)
+            setf(ac + dx, ac + dy, max(abs(dx), abs(dy)) != 1)
 
-    # Format info: ECC level M (bits 00) + mask 0, BCH(15,5), xor 0x5412.
-    rem = 0
+    # Format info: ECC level bits + mask 0, BCH(15,5), xor 0x5412.
+    data = ecbits << 3
+    rem = data
     for _ in range(10):
         rem = (rem << 1) ^ ((rem >> 9) * 0x537)
-    bits = rem ^ 0x5412
+    bits = ((data << 10) | rem) ^ 0x5412
 
     def bit(i):
         return (bits >> i) & 1
