@@ -2,7 +2,7 @@ var W=960,H=672,P=W/2,Q=H/2,img,sc,mn,ox,oy,d=null,tab='c',rc=true,dirty=true,la
 function $(i){return document.getElementById(i);}
 var f=$('f'),fc=$('fc'),c=$('c'),x=c.getContext('2d'),pv=$('pv'),pvx=pv.getContext('2d'),z=$('z'),rs=$('rs'),
 cur=$('cur'),sm=$('sm'),sub=$('sub'),ni=$('ni'),sn=$('sn'),cl=$('cl'),sh=$('sh'),ss=$('ss'),pg=$('pg'),
-curName='',curMode='name';$('hp').textContent=location.host;
+curName='',curMode='name';
 function $$(i,v){$(i).style.display=v;}
 /* ---- status ---- */
 function note(t,b){sub.className='sub'+(b?' bz':'');sm.textContent=t;}
@@ -11,13 +11,12 @@ function show(){cur.textContent=curMode=='photo'?'Photo':(curName||'Nothing yet'
  sn.disabled=!ni.value||(ni.value==curName&&curMode=='name');
  cl.disabled=curMode=='name'&&!curName;$('cn').textContent=ni.value.length+'/24';}
 ni.oninput=show;show();
-function poll(){fetch('/status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){
- curName=s.name;curMode=s.mode;show();
- if(s.busy&&pn++<40){note('Panel refreshing...',1);pt=setTimeout(poll,3000);}
+function poll(){rd().then(function(t){
+ curName=t.name;curMode=t.mode;show();
+ if(t.busy&&pn++<40){note('Panel refreshing...',1);pt=setTimeout(poll,3000);}
  else{note(pn?'Done, it is on the badge.':'');pn=0;}})
  .catch(function(){if(pn&&pn++<40)pt=setTimeout(poll,3000);else note('');});}
 function watch(){clearTimeout(pt);pn=1;note('Panel refreshing...',1);pt=setTimeout(poll,1500);}
-poll();
 /* ---- feedback ---- */
 function toast(t){var e=$('toast');e.textContent=t;e.className='on';clearTimeout(tk);tk=setTimeout(function(){e.className='';},4000);}
 /* Errors go in a modal (inline text can be scrolled out of view); success is a toast. */
@@ -25,18 +24,82 @@ function alertBox(t){$('ovt').textContent=t;fo=document.activeElement;$$('ov','f
 function ovc(){$$('ov','none');if(fo&&fo.focus)fo.focus();}
 $('ovb').onclick=ovc;$('ov').onclick=function(e){if(e.target==this)ovc();};
 function prog(v){pg.className=v<0?'n':'';pg.firstChild.style.width=v<0?'':Math.round(v*100)+'%';}
-/* XHR (fetch cannot report upload progress). Resolves to [status, text]. */
-function xp(url,body,hdr,cb){return new Promise(function(ok,no){var r=new XMLHttpRequest(),k;r.open('POST',url);
- for(k in hdr)r.setRequestHeader(k,hdr[k]);r.timeout=120000;
- if(cb)r.upload.onprogress=function(e){if(e.lengthComputable)cb(e.loaded/e.total);};
- r.onload=function(){ok([r.status,r.responseText]);};r.onerror=r.ontimeout=function(){no();};r.send(body);});}
-/* The badge answers 503 while it is still deploying the last submission: wait 5 s and try once more. */
-function rp(url,body,hdr,cb,lb){return xp(url,body,hdr,cb).then(function(a){if(a[0]!=503)return a;
+/* ---- BLE transport ----
+   Badge GATT service: CTRL (write, commands), DATA (write w/o response, photo bytes),
+   STATUS (read + notify). STATUS = authed,busy,mode,ev (1 byte each), chunk (u16), arg (u32), then the name. */
+var SVC='7b1f0001-5c0e-4b6e-9a3d-5e11c0de0001',U_CT='7b1f0002-5c0e-4b6e-9a3d-5e11c0de0001',
+ U_DT='7b1f0003-5c0e-4b6e-9a3d-5e11c0de0001',U_ST='7b1f0004-5c0e-4b6e-9a3d-5e11c0de0001',
+ EV={AUTH_OK:1,AUTH_BAD:2,PH_READY:3,PH_OK:4,PH_ERR:5,LOCKED:6,BUSY:7,NAME_OK:8,ACK:9,NEED_AUTH:10},
+ dev,chC,chD,chS,chunk=20,wt=[],authed=false,MODES=['home','name','photo'];
+function parse(v){return{authed:v.getUint8(0),busy:v.getUint8(1),mode:MODES[v.getUint8(2)]||'home',ev:v.getUint8(3),
+ chunk:v.getUint16(4),arg:v.getUint32(6),name:v.byteLength>10?new TextDecoder().decode(new DataView(v.buffer,v.byteOffset+10)):''};}
+function rd(){return chS.readValue().then(function(v){var t=parse(v);if(t.chunk)chunk=t.chunk;return t;});}
+function onst(e){var t=parse(e.target.value),i;if(t.chunk)chunk=t.chunk;if(!t.ev)return;
+ for(i=0;i<wt.length;i++)if(wt[i].set.indexOf(t.ev)>=0){var w=wt.splice(i,1)[0];clearTimeout(w.t);w.ok(t);return;}}
+/* Register BEFORE writing: the notification can beat the write's own completion. */
+function wev(set,ms){return new Promise(function(ok,no){var w={set:set,ok:ok};
+ w.t=setTimeout(function(){wt.splice(wt.indexOf(w),1);no(new Error('timeout'));},ms||8000);wt.push(w);});}
+function ctl(bytes){return chC.writeValueWithResponse(bytes);}
+function cmd(op,body){var a=new Uint8Array(1+(body?body.length:0));a[0]=op.charCodeAt(0);if(body)a.set(body,1);return ctl(a);}
+/* Resolves to [status,text] like the old HTTP calls: 200 ok, 503 badge busy, other = error text. */
+function tx(kind,body,cb){
+ if(kind=='name'){var w=wev([EV.NAME_OK,EV.BUSY,EV.NEED_AUTH]);
+  return cmd('N',new TextEncoder().encode(body)).then(function(){return w;}).then(function(t){
+   if(t.ev==EV.BUSY)return[503,'Badge is busy updating its display. Wait a few seconds and try again.'];
+   if(t.ev==EV.NEED_AUTH)return[401,'Badge is locked. Enter the code again.'];
+   return rd().then(function(s){return[200,s.name];});});}
+ var n=body.length,planes=n/(W*H/8),sent=0,win=Math.max(chunk,Math.floor(3840/chunk)*chunk),w1=wev([EV.PH_READY,EV.BUSY,EV.NEED_AUTH]);
+ return cmd('P',new Uint8Array([planes])).then(function(){return w1;}).then(function(t){
+  if(t.ev==EV.BUSY)return[503,'Badge is busy updating its display. Wait a few seconds and try again.'];
+  if(t.ev==EV.NEED_AUTH)return[401,'Badge is locked. Enter the code again.'];
+  function win1(){if(sent>=n){var w3=wev([EV.PH_OK,EV.PH_ERR],15000);
+    return cmd('E').then(function(){return w3;}).then(function(e){
+     return e.ev==EV.PH_OK?[200,'ok']:[500,'The badge could not use that image. Try again.'];});}
+   var end=Math.min(n,sent+win),chain=Promise.resolve(),o;
+   for(o=sent;o<end;o+=chunk)(function(o){chain=chain.then(function(){
+     return chD.writeValueWithoutResponse(body.subarray(o,Math.min(end,o+chunk)));});})(o);
+   var w2=wev([EV.ACK,EV.NEED_AUTH],8000);
+   return chain.then(function(){return cmd('S');}).then(function(){return w2;}).then(function(a){
+    if(a.ev!=EV.ACK||a.arg!=end)return[500,'Transfer got out of sync. Try again.'];
+    sent=end;if(cb)cb(sent/n);return win1();});}
+  return win1();});}
+/* The badge answers busy while it is still deploying the last submission: wait 5 s and try once more. */
+function rp(kind,body,cb,lb){return tx(kind,body,cb).then(function(a){if(a[0]!=503)return a;
  return new Promise(function(ok){var n=5;(function t(){if(n<1)return ok();lb('Badge is busy, retrying in '+n+'s');n--;setTimeout(t,1000);})();})
- .then(function(){lb('Sending...');return xp(url,body,hdr,cb);});});}
+ .then(function(){lb('Sending...');return tx(kind,body,cb);});});}
+/* ---- connect / pairing ---- */
+var bsec=$('bsec'),bn=$('bn'),cb=$('cb'),af=$('af'),ci=$('ci'),ch=$('ch');
+function gate(on){authed=on;[].forEach.call(document.querySelectorAll('main > section:not(#bsec)'),function(e){
+ e.style.opacity=on?'':'.4';if(on)e.removeAttribute('inert');else e.setAttribute('inert','');});}
+function bst(t,cls){bn.textContent=t;bn.className='cur'+(cls?' '+cls:'');}
+function lost(){wt.forEach(function(w){clearTimeout(w.t);});wt=[];gate(false);af.style.display='none';cb.style.display='';
+ cb.textContent='Connect';cb.disabled=false;bst('Not connected','e');}
+function ckey(){return'code:'+(dev&&dev.name||'');}
+function unlock(code){var w=wev([EV.AUTH_OK,EV.AUTH_BAD,EV.LOCKED],6000);
+ return cmd('A',new TextEncoder().encode(code)).then(function(){return w;}).then(function(t){
+  if(t.ev==EV.AUTH_OK){try{localStorage.setItem(ckey(),code);}catch(e){}gate(true);af.style.display='none';cb.style.display='none';
+   bst(dev.name);ch.textContent='';poll();return true;}
+  try{localStorage.removeItem(ckey());}catch(e){}
+  ch.textContent=t.ev==EV.LOCKED?'Too many wrong codes. Wait 10 seconds and reconnect.':'Wrong code. Look at the number on the badge screen.';
+  return false;});}
+function connect(){
+ if(!navigator.bluetooth){ch.textContent='This browser has no Web Bluetooth. On iPhone, open this page in the Bluefy browser.';return;}
+ cb.disabled=true;cb.textContent='Choosing...';ch.textContent='';
+ navigator.bluetooth.requestDevice({filters:[{services:[SVC]},{namePrefix:'Badge-'}],optionalServices:[SVC]}).then(function(d){
+  dev=d;cb.textContent='Connecting...';bst(d.name||'Badge','e');d.addEventListener('gattserverdisconnected',lost);return d.gatt.connect();})
+ .then(function(g){return g.getPrimaryService(SVC);})
+ .then(function(sv){return Promise.all([sv.getCharacteristic(U_CT),sv.getCharacteristic(U_DT),sv.getCharacteristic(U_ST)]);})
+ .then(function(c){chC=c[0];chD=c[1];chS=c[2];chS.addEventListener('characteristicvaluechanged',onst);return chS.startNotifications();})
+ .then(rd).then(function(){var saved='';try{saved=localStorage.getItem(ckey())||'';}catch(e){}
+  return saved?unlock(saved):false;})
+ .then(function(ok){if(!ok){cb.style.display='none';af.style.display='flex';ci.value='';ci.focus();}})
+ .catch(function(e){if(e&&e.name=='NotFoundError'){lost();return;}lost();ch.textContent='Could not connect: '+(e&&e.message||e);});}
+cb.onclick=function(ev){ev.preventDefault();connect();};
+$('af').onsubmit=function(ev){ev.preventDefault();if(ci.value.length==4)unlock(ci.value).then(function(ok){if(!ok)ci.select();}).catch(function(){ch.textContent='No answer from the badge.';});};
+gate(false);lost();
 /* ---- name ---- */
 function sendName(v){sn.disabled=cl.disabled=true;sn.textContent='Sending...';
- rp('/',new URLSearchParams({name:v}),{},null,function(t){sn.textContent=t;})
+ rp('name',v,null,function(t){sn.textContent=t;})
  .then(function(a){if(a[0]==200){curName=a[1];curMode='name';ni.value='';ni.blur();toast(a[1]?'Name sent.':'Name cleared.');watch();}
   else alertBox(a[1]);})
  .catch(function(){alertBox('Could not reach the badge.');})
@@ -112,7 +175,7 @@ function reset(){closeSheet();img=null;last=null;dirty=true;f.value=fc.value='';
 $('cx').onclick=function(){if(tab=='p')tabTo('c');else reset();};
 ss.onclick=function(){if(busy||!img)return;if(tab=='c'){tabTo('p');return;}lock(true);ss.textContent='Preparing...';prog(-1);
  setTimeout(function(){var r=res();ss.textContent='Sending...';prog(0);
-  rp('/photo',r.red?r.out:r.out.subarray(0,W*H/8),{'Content-Type':'application/octet-stream'},
+  rp('photo',r.red?r.out:r.out.subarray(0,W*H/8),
    function(p){prog(p);ss.textContent='Sending '+Math.round(p*100)+'%';},
    function(t){ss.textContent=t;prog(-1);})
   .then(function(a){if(a[0]==200){reset();curMode='photo';show();toast('Sent! The panel takes a while to refresh.');watch();}

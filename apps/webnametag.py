@@ -1,37 +1,41 @@
-"""Web Nametag: the badge hosts its own WiFi access point; join it, open the page, and show a
-typed name or an uploaded photo.
+"""Web Nametag over Bluetooth LE: a web page (hosted on GitHub Pages, opened in a Web Bluetooth
+browser such as Bluefy on iPhone) connects to the badge, and shows a typed name or an uploaded
+photo on the panel. No WiFi is used.
 
-UserA toggles the access point; UserB resets the screen to the generated home graphic (which
-also clears any name/photo). Nothing is persisted.
+UserA toggles Bluetooth; UserB resets the screen to the generated home graphic (which also
+clears any name/photo and picks a NEW pairing code). Nothing is persisted.
 
-The access point (SSID / password / channel from data/webnametag_config.py) needs no existing
-network and no internet. The home graphic shows a WiFi-join QR (WIFI:T:WPA;S:..;P:..;;), the
-credentials and the URL. The screen is only redrawn when its content changes (new name/photo,
-reset, or the AP coming up / going down on the home graphic).
+Identity: the badge advertises as "Badge-<BLE_NAME>" (BLE_NAME from data/webnametag_config.py),
+or "Badge-<last 2 MAC bytes>" if unset, so several badges are told apart in the browser's chooser.
+The home graphic shows the page URL (text + QR), the advertised name and a random 4-digit pairing
+code. The page must send that code first (AUTH); until then every other write is refused. Three
+wrong codes disconnect and lock out for 10 s. This keeps neighbours from overwriting the nametag;
+it is not strong security.
 
-The page is two static files in data/webnametag/ (index.html, app.js) streamed from flash, so
-they cost no RAM. The AP has no internet: the page must never load anything from a CDN.
+GATT (one 128-bit service, see UUIDs below; the page, web/webnametag/app.js, mirrors them):
+  CTRL   write           b"A"+code | b"N"+name | b"P"+planes(1|2) | b"S" (sync) | b"E" (end photo)
+  DATA   write no resp   raw photo bytes, appended in order (gatts buffer in append mode)
+  STATUS read + notify   authed, busy, mode, ev (1 byte each), chunk (u16), arg (u32), then the name.
+                         ev != 0 is a one-shot event (see EV_*); arg is the received byte count for EV_ACK.
+A photo is sent as P, then DATA windows of <= 3840 bytes each followed by S (the badge answers with
+EV_ACK and its byte count, so the 4096-byte DATA buffer can never overflow), then E. Body =
+black plane (1 = black), optionally followed by a red plane (1 = red), 960 x 672 at 120 bytes/row,
+MSB first; a pixel is never set in both. The badge copies the planes into the framebuffers; LVGL
+only draws text.
 
-The LED bar shows the state: green = AP up, red = failed / no config, orange chase = starting
-or loading a new name/image, dark = off. While a submission is being deployed (upload in
-progress, redraw pending, or panel refreshing) new POSTs are rejected with 503; nothing is
-queued. The page polls GET /status (busy / mode / name) to show when the panel has finished.
-
-The web page crops and dithers photos in the browser for the whole panel and POSTs them to
-/photo as raw 1-bit planes (960 x PHOTO_H, 120 bytes/row, MSB first). Body = black plane
-(1 = black), optionally followed by a red plane (1 = red); a pixel is never set in both.
-The badge copies the planes into the framebuffers; LVGL only draws text.
+The LED bar shows the state: green = Bluetooth on, red = failed, orange chase = loading a new
+name/image, dark = off. While a submission is being deployed (receiving, redraw pending, or panel
+refreshing) new commands get EV_BUSY; nothing is queued.
 """
 
-import asyncio as aio
 import gc
-import json
 import os
+import struct
 import sys
 import time
 
+import bluetooth
 import lvgl
-import network
 
 from apps.base_app import BaseApp
 from lib.button import UserA, UserB
@@ -41,18 +45,30 @@ from lib.qr import make as qr_make
 
 # Settings live in data/webnametag_config.py (untracked; see the .example.py).
 # A failed import here would break app_switcher's `from apps import ...` for ALL apps at
-# boot, so a missing/broken config must not raise: the app just reports "No config".
+# boot, so a missing/broken config must not raise.
 try:
     from data import webnametag_config as _cfg
 
-    AP_SSID = getattr(_cfg, "AP_SSID", "Badge-Name")
-    AP_PASSWORD = getattr(_cfg, "AP_PASSWORD", None)
-    AP_CHANNEL = getattr(_cfg, "AP_CHANNEL", 6)
+    BLE_NAME = getattr(_cfg, "BLE_NAME", "")
+    PAGE_URL = getattr(_cfg, "PAGE_URL", "https://frillweeman.github.io/supercon-2026-badge/")
 except Exception as _ex:
     print("webnametag: no usable data/webnametag_config.py:", _ex)
-    AP_SSID, AP_PASSWORD, AP_CHANNEL = "Badge-Name", None, 6
+    BLE_NAME = ""
+    PAGE_URL = "https://frillweeman.github.io/supercon-2026-badge/"
 
-WEB_DIR = "/data/webnametag/"
+_SVC = bluetooth.UUID("7b1f0001-5c0e-4b6e-9a3d-5e11c0de0001")
+_CTRL = bluetooth.UUID("7b1f0002-5c0e-4b6e-9a3d-5e11c0de0001")
+_DATA = bluetooth.UUID("7b1f0003-5c0e-4b6e-9a3d-5e11c0de0001")
+_STAT = bluetooth.UUID("7b1f0004-5c0e-4b6e-9a3d-5e11c0de0001")
+_IRQ_CONNECT, _IRQ_DISCONNECT, _IRQ_WRITE, _IRQ_MTU = 1, 2, 3, 21
+EV_AUTH_OK, EV_AUTH_BAD, EV_PH_READY, EV_PH_OK, EV_PH_ERR = 1, 2, 3, 4, 5
+EV_LOCKED, EV_BUSY, EV_NAME_OK, EV_ACK, EV_NEED_AUTH = 6, 7, 8, 9, 10
+_MODE_IDX = {"home": 0, "name": 1, "photo": 2}
+DATA_BUF = 4096
+MAX_BAD_CODES = 3
+LOCKOUT_MS = 10000
+RX_TIMEOUT_MS = 10000
+
 MAX_NAME = 24
 ROW_BYTES = 960 // 8  # 120 bytes per framebuffer row
 PHOTO_H = 672  # the photo covers the whole panel
@@ -70,7 +86,7 @@ LED_ORANGE = (6, 2, 0)
 LED_ORANGE_TAIL = (3, 1, 0)
 CHASE_STEP_MS = 90
 _LED_FILL = {"red": LED_RED, "green": LED_GREEN, "off": LED_OFF}
-_FAILED_STATUSES = ("Failed", "No config")
+_FAILED_STATUSES = ("Failed",)
 
 _WHITE = lvgl.color_hex(0xFFFFFF)
 _BLACK = lvgl.color_hex(0x000000)
@@ -134,37 +150,13 @@ def _chase():
         i += 1
 
 
-def _wifi_esc(s):
-    for ch in "\\;,:\"":
-        s = s.replace(ch, "\\" + ch)
-    return s
+def _ascii(raw):
+    """Printable ASCII only, as str."""
+    return bytes(c for c in raw if 32 <= c <= 126).decode()
 
 
-# path -> (file, content type). Only these are ever served; streamed from flash, no RAM cost.
-_FILES = {
-    b"/": ("index.html", "text/html; charset=utf-8"),
-    b"/app.js": ("app.js", "application/javascript"),
-}
-
-
-def _urldecode(raw):
-    """Decode form-encoded bytes, keeping printable ASCII only."""
-    raw = raw.replace(b"+", b" ")
-    out = bytearray()
-    i = 0
-    n = len(raw)
-    while i < n:
-        c = raw[i]
-        if c == 37 and i + 2 < n:  # '%'
-            try:
-                c = int(raw[i + 1 : i + 3], 16)
-                i += 2
-            except ValueError:
-                pass
-        if 32 <= c <= 126:
-            out.append(c)
-        i += 1
-    return out.decode()
+def _uuid_le(u):
+    return bytes.fromhex(u.replace("-", ""))[::-1]
 
 
 class WebNametagApp(BaseApp):
@@ -174,64 +166,239 @@ class WebNametagApp(BaseApp):
         self.launched = False
 
         self.name_text = ""
-        self.status = "WiFi off"  # "WiFi off", "Ready", "Failed", "No config"
-        self.ip = ""
+        self.status = "BLE off"  # "BLE off", "Ready", "Failed"
         self.mode = "home"  # "home" (generated graphic), "name" or "photo"
         # bytearray of PHOTO_BYTES (black only) or 2*PHOTO_BYTES (black then red) in photo mode
         self._photo = None
         self._need_full = False
-        self._receiving = False  # a /photo body is being read
         self._last_run_ms = None  # when run() last executed (None = never)
         self._led_state = None  # last LED state applied ("red", "green", "orange", "off")
-        self._ap = None
-        self._server = None
         self._drawn = None  # _key() of what is on screen
         self._scr = None
         self._boxes = []
+        # BLE
+        self._ble = None
+        self._h_ctrl = self._h_data = self._h_stat = 0
+        self._adv_name = self._make_adv_name()
+        self._code = ""  # current 4-digit pairing code
+        self._conn = None
+        self._authed = False
+        self._bad = 0
+        self._lock_until = None  # ticks_ms until which AUTH is refused
+        self._mtu = 23
+        self._receiving = False  # a photo is being received
+        self._buf = None  # photo bytes received so far
+        self._total = 0
+        self._got = 0
+        self._rx_ms = 0
+        self._stat_key = None
 
-    # ---- Access point --------------------------------------------------
-    def _ap_valid(self):
-        return bool(AP_SSID) and AP_PASSWORD is not None and 8 <= len(AP_PASSWORD) <= 63
+    # ---- Bluetooth -------------------------------------------------------
+    @staticmethod
+    def _make_adv_name():
+        import machine
 
-    def _wifi_enable(self):
-        if not self._ap_valid():
-            self.status = "No config"
-            return
+        suffix = _ascii(BLE_NAME.encode())[:18] if BLE_NAME else "%02X%02X" % tuple(machine.unique_id()[-2:])
+        return "Badge-" + suffix
+
+    def _new_code(self):
+        self._code = "%04d" % (int.from_bytes(os.urandom(2), "big") % 10000)
+
+    def _ble_enable(self):
         gc.collect()
-        print("webnametag: free before AP:", gc.mem_free())
+        print("webnametag: free before BLE:", gc.mem_free())
         try:
-            if self._ap is None:
-                self._ap = network.WLAN(network.AP_IF)
-            self._ap.active(True)
-            self._ap.config(
-                essid=AP_SSID,
-                password=AP_PASSWORD,
-                authmode=network.AUTH_WPA2_PSK,
-                channel=AP_CHANNEL,
-            )
-            self.ip = self._ap.ifconfig()[0]
+            ble = self._ble = bluetooth.BLE()
+            ble.active(True)
+            for kw in ({"gap_name": self._adv_name}, {"mtu": 512}):
+                try:
+                    ble.config(**kw)
+                except Exception as ex:
+                    print("webnametag: ble.config", kw, ex)
+            ble.irq(self._irq)
+            rw = bluetooth.FLAG_WRITE | bluetooth.FLAG_WRITE_NO_RESPONSE
+            ((self._h_ctrl, self._h_data, self._h_stat),) = ble.gatts_register_services((
+                (_SVC, (
+                    (_CTRL, rw),
+                    (_DATA, rw),
+                    (_STAT, bluetooth.FLAG_READ | bluetooth.FLAG_NOTIFY),
+                )),
+            ))
+            ble.gatts_set_buffer(self._h_ctrl, 64)
+            ble.gatts_set_buffer(self._h_data, DATA_BUF, True)  # append: bursts are not lost
+            ble.gatts_set_buffer(self._h_stat, 64)
+            self._new_code()
+            self._conn = None
+            self._authed = False
             self.status = "Ready"
-            print("webnametag: AP up, ip", self.ip, "free:", gc.mem_free())
-            aio.create_task(self._start_server())
+            self._stat_key = None
+            self._advertise()
+            print("webnametag: BLE up as", self._adv_name, "free:", gc.mem_free())
         except Exception as ex:  # MemoryError, OSError, ...
-            print("webnametag: AP enable failed")
+            print("webnametag: BLE enable failed")
             sys.print_exception(ex)
             self.status = "Failed"
-            self.ip = ""
+            try:
+                self._ble.active(False)
+            except Exception:
+                pass
             gc.collect()
 
-    def _wifi_disable(self):
-        if self._server is not None:
-            self._server.close()
-            self._server = None
+    def _ble_disable(self):
         try:
-            if self._ap is not None:
-                self._ap.active(False)
+            if self._ble is not None:
+                if self._conn is not None:
+                    self._ble.gap_disconnect(self._conn)
+                self._ble.gap_advertise(None)
+                self._ble.active(False)
         except Exception as ex:
             sys.print_exception(ex)
-        self.ip = ""
-        self.status = "WiFi off"
+        self._conn = None
+        self._authed = False
+        self._abort_rx()
+        self.status = "BLE off"
         gc.collect()
+
+    def _advertise(self):
+        name = self._adv_name.encode()
+        adv = b"\x02\x01\x06" + bytes((len(name) + 1, 0x09)) + name
+        resp = bytes((17, 0x07)) + _uuid_le("7b1f0001-5c0e-4b6e-9a3d-5e11c0de0001")
+        self._ble.gap_advertise(100000, adv_data=adv, resp_data=resp, connectable=True)
+
+    def _abort_rx(self):
+        self._receiving = False
+        self._buf = None
+        self._got = self._total = 0
+
+    def _chunk(self):
+        return min(self._mtu - 3, 244)
+
+    def _status_bytes(self, ev=0, arg=0):
+        hdr = struct.pack(
+            ">BBBBHI", int(self._authed), int(self._busy()), _MODE_IDX[self.mode], ev, self._chunk(), arg
+        )
+        return hdr
+
+    def _publish(self, ev=0, arg=0):
+        """Update the readable STATUS value; with an event, also notify the (short) header."""
+        hdr = self._status_bytes(ev, arg)
+        try:
+            self._ble.gatts_write(self._h_stat, hdr + self.name_text.encode())
+            if ev and self._conn is not None:
+                self._ble.gatts_notify(self._conn, self._h_stat, hdr)
+        except Exception as ex:
+            print("webnametag: status publish failed", ex)
+
+    def _refresh_status(self):
+        """Keep the readable STATUS fresh (busy/mode/name change from run(), not from IRQs)."""
+        if self.status != "Ready":
+            return
+        key = (self._authed, self._busy(), self.mode, self.name_text, self._chunk())
+        if key != self._stat_key:
+            self._stat_key = key
+            self._publish()
+
+    def _irq(self, event, data):
+        try:
+            if event == _IRQ_CONNECT:
+                self._conn = data[0]
+                self._authed = False
+                self._bad = 0
+                self._stat_key = None
+            elif event == _IRQ_DISCONNECT:
+                self._conn = None
+                self._authed = False
+                self._mtu = 23
+                self._abort_rx()
+                self._stat_key = None
+                if self.status == "Ready":
+                    self._advertise()
+            elif event == _IRQ_MTU:
+                self._mtu = data[1]
+                self._stat_key = None
+            elif event == _IRQ_WRITE:
+                h = data[1]
+                if h == self._h_ctrl:
+                    self._on_ctrl(bytes(self._ble.gatts_read(h)))
+                elif h == self._h_data:
+                    self._on_data(self._ble.gatts_read(h))
+        except Exception as ex:
+            print("webnametag: irq error")
+            sys.print_exception(ex)
+
+    def _locked(self):
+        return self._lock_until is not None and time.ticks_diff(self._lock_until, time.ticks_ms()) > 0
+
+    def _on_ctrl(self, msg):
+        op = msg[:1]
+        if op == b"A":
+            if self._locked():
+                return self._publish(EV_LOCKED)
+            if msg[1:] == self._code.encode():
+                self._authed = True
+                self._bad = 0
+                self._stat_key = None
+                return self._publish(EV_AUTH_OK)
+            self._bad += 1
+            if self._bad >= MAX_BAD_CODES:
+                self._lock_until = time.ticks_add(time.ticks_ms(), LOCKOUT_MS)
+                self._publish(EV_LOCKED)
+                self._ble.gap_disconnect(self._conn)
+                return
+            return self._publish(EV_AUTH_BAD)
+        if not self._authed:
+            return self._publish(EV_NEED_AUTH)
+        if op == b"N":
+            if self._busy():
+                return self._publish(EV_BUSY)
+            self.name_text = _ascii(msg[1:])[:MAX_NAME]
+            print("webnametag: name ->", repr(self.name_text))
+            self.mode = "name" if self.name_text else "home"
+            self._photo = None
+            self._need_full = True
+            self._stat_key = None
+            return self._publish(EV_NAME_OK)
+        if op == b"P":
+            planes = msg[1] if len(msg) > 1 else 0
+            if self._busy():
+                return self._publish(EV_BUSY)
+            if planes not in (1, 2):
+                return self._publish(EV_PH_ERR)
+            try:
+                self._photo = None
+                self._buf = None
+                gc.collect()
+                self._buf = bytearray(planes * PHOTO_BYTES)
+            except MemoryError:
+                self._abort_rx()
+                return self._publish(EV_PH_ERR)
+            self._total = planes * PHOTO_BYTES
+            self._got = 0
+            self._rx_ms = time.ticks_ms()
+            self._receiving = True
+            return self._publish(EV_PH_READY)
+        if op == b"S":
+            return self._publish(EV_ACK, self._got)
+        if op == b"E":
+            ok = self._receiving and self._got == self._total
+            if ok:
+                self._photo = self._buf
+                self.mode = "photo"
+                self._need_full = True
+                self._stat_key = None
+            self._abort_rx()  # drops _buf; _photo (if set above) keeps the data
+            return self._publish(EV_PH_OK if ok else EV_PH_ERR)
+
+    def _on_data(self, d):
+        if not (self._authed and self._receiving and self._buf is not None):
+            return
+        n = len(d)
+        if self._got + n > self._total:
+            self._abort_rx()
+            return self._publish(EV_PH_ERR)
+        self._buf[self._got : self._got + n] = d
+        self._got += n
+        self._rx_ms = time.ticks_ms()
 
     # ---- Busy tracking and LEDs ----------------------------------------
     def _active(self):
@@ -247,14 +414,14 @@ class WebNametagApp(BaseApp):
         return display._framebuffer_ready.is_set() or not display.is_done_updating()
 
     def _key(self):
-        return (self.mode, self.name_text, self.ip if self.mode == "home" else None)
+        return (self.mode, self.name_text, (self.status, self._code) if self.mode == "home" else None)
 
     def _pending(self):
-        """A redraw is due (new content, reset, or the AP IP appeared/disappeared on home)."""
+        """A redraw is due (new content, reset, or Bluetooth state/code changed on home)."""
         return self._need_full or self._drawn != self._key()
 
     def _busy(self):
-        """Is a submission being deployed right now? New submissions are rejected then."""
+        """Is a submission being deployed right now? New submissions are refused then."""
         if self._receiving or self._display_busy():
             return True
         # Pending redraw only counts while we're on screen: run() is what clears it.
@@ -267,9 +434,9 @@ class WebNametagApp(BaseApp):
             return "orange"
         if self.status in _FAILED_STATUSES:
             return "red"
-        if self.status == "WiFi off":
+        if self.status == "BLE off":
             return "off"
-        return "green"  # AP up and idle
+        return "green"  # Bluetooth on and idle
 
     def _update_leds(self):
         want = self._led_wanted()
@@ -285,150 +452,6 @@ class WebNametagApp(BaseApp):
                 leds.fill(_LED_FILL[want])
         except Exception as ex:
             sys.print_exception(ex)
-
-    # ---- HTTP server ---------------------------------------------------
-    async def _start_server(self):
-        try:
-            server = await aio.start_server(self._handle, "0.0.0.0", 80)
-        except Exception as ex:
-            print("webnametag: server start failed")
-            sys.print_exception(ex)
-            self.status = "Failed"
-            return
-        if self.status == "Ready":
-            self._server = server
-        else:  # toggled off while starting
-            server.close()
-
-    async def _recv_photo(self, reader, n):
-        buf = bytearray(n)
-        mv = memoryview(buf)
-        got = 0
-        while got < n:
-            chunk = await aio.wait_for(reader.read(min(2048, n - got)), 10)
-            if not chunk:
-                raise OSError("photo upload ended early")
-            mv[got : got + len(chunk)] = chunk
-            got += len(chunk)
-        return buf
-
-    async def _drain(self, reader, n):
-        """Read and discard a request body so the client sees our reply, not a reset."""
-        n = min(n, 2 * PHOTO_BYTES)
-        while n > 0:
-            chunk = await aio.wait_for(reader.read(min(2048, n)), 5)
-            if not chunk:
-                break
-            n -= len(chunk)
-
-    async def _send_file(self, writer, spec):
-        fname, ctype = spec
-        path = WEB_DIR + fname
-        try:
-            size = os.stat(path)[6]
-        except OSError:
-            writer.write(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\nMissing " + fname.encode())
-            return
-        writer.write(
-            (
-                "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
-                "Cache-Control: no-cache\r\nConnection: close\r\n\r\n" % (ctype, size)
-            ).encode()
-        )
-        buf = bytearray(1024)
-        with open(path, "rb") as f:
-            while True:
-                n = f.readinto(buf)
-                if not n:
-                    break
-                writer.write(memoryview(buf)[:n])
-                await writer.drain()
-
-    async def _handle(self, reader, writer):
-        try:
-            line = await aio.wait_for(reader.readline(), 5)
-            parts = line.split()
-            method = parts[0] if parts else b""
-            path = parts[1] if len(parts) > 1 else b"/"
-            clen = 0
-            for _ in range(40):
-                h = await aio.wait_for(reader.readline(), 5)
-                if h in (b"\r\n", b"\n", b""):
-                    break
-                if h.lower().startswith(b"content-length:"):
-                    clen = int(h.split(b":", 1)[1])
-            if method == b"POST" and self._busy():
-                # Still deploying the previous submission: reject, never queue.
-                await self._drain(reader, clen)
-                print("webnametag: rejected POST, busy")
-                writer.write(
-                    b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n"
-                    b"Content-Type: text/plain\r\nConnection: close\r\n\r\n"
-                    b"Badge is busy updating its display. Wait a few seconds and try again."
-                )
-            elif method == b"POST" and path == b"/photo":
-                if clen not in (PHOTO_BYTES, 2 * PHOTO_BYTES):
-                    writer.write(
-                        b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n"
-                        b"Connection: close\r\n\r\nBad photo size"
-                    )
-                else:
-                    # No await between the _busy() check above and this flag, so two
-                    # requests can never both pass the check.
-                    self._receiving = True
-                    try:
-                        self._photo = None
-                        gc.collect()
-                        self._photo = await self._recv_photo(reader, clen)
-                        self.mode = "photo"
-                        self._need_full = True
-                    finally:
-                        self._receiving = False
-                    print("webnametag: photo received")
-                    writer.write(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
-                        b"Photo received. The panel takes a while to refresh."
-                    )
-            elif method == b"POST":
-                body = await aio.wait_for(reader.readexactly(min(clen, 256)), 5)
-                for field in body.split(b"&"):
-                    if field.startswith(b"name="):
-                        self.name_text = _urldecode(field[5:])[:MAX_NAME]
-                        print("webnametag: name ->", repr(self.name_text))
-                self.mode = "name" if self.name_text else "home"
-                self._photo = None
-                self._need_full = True
-                # The page shows this as the current name.
-                writer.write(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
-                    + self.name_text.encode()
-                )
-            elif path.startswith(b"/status"):
-                # Polled by the page to learn the current name and when the panel is done.
-                writer.write(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                    b"Cache-Control: no-store\r\nConnection: close\r\n\r\n"
-                )
-                writer.write(
-                    json.dumps(
-                        {"busy": int(self._busy()), "mode": self.mode, "name": self.name_text}
-                    ).encode()
-                )
-            else:
-                spec = _FILES.get(path.split(b"?", 1)[0])
-                if spec is None:
-                    writer.write(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\nNot found")
-                else:
-                    await self._send_file(writer, spec)
-            await writer.drain()
-        except Exception as ex:
-            print("webnametag: request error", ex)
-        finally:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
-                pass
 
     # ---- Display -------------------------------------------------------
     def _box(self, parent, x, y, w, h, font, color, bg, text):
@@ -454,12 +477,11 @@ class WebNametagApp(BaseApp):
 
     def _draw_home(self, fb, scr):
         self._box(scr, 30, 20, 900, 70, F_TITLE, _RED, _WHITE, "Control Me!")
-        qr_px = 0
-        if self.ip:
-            payload = "WIFI:T:WPA;S:%s;P:%s;;" % (_wifi_esc(AP_SSID), _wifi_esc(AP_PASSWORD))
+        if self.status == "Ready":
+            qr_px = 0
             try:
-                rows = qr_make(payload)
-            except ValueError:  # credentials too long for the on-badge encoder
+                rows = qr_make(PAGE_URL)
+            except ValueError:  # URL too long for the on-badge encoder
                 rows = None
             if rows:
                 qr_px = len(rows) * QR_SCALE
@@ -469,26 +491,24 @@ class WebNametagApp(BaseApp):
                     for sl in range(QR_SCALE):
                         o = (QR_Y + r * QR_SCALE + sl) * ROW_BYTES + (QR_X >> 3)
                         fb[o : o + len(line)] = line
-        cx = QR_X + qr_px + 24 if qr_px else 60
-        cw = 960 - 24 - cx
-        if self.ip:
-            self._box(scr, cx, QR_Y, cw, 40, F_HEAD, _BLACK, _WHITE,
-                      "1. Scan to join" if qr_px else "1. Join this WiFi")
-            self._box(scr, cx, QR_Y + 46, cw, 28, F_SMALL, _BLACK, _WHITE, "Network")
-            self._box(scr, cx, QR_Y + 74, cw, 34, F_BODY, _RED, _WHITE, AP_SSID)
-            self._box(scr, cx, QR_Y + 112, cw, 28, F_SMALL, _BLACK, _WHITE, "Password")
-            self._box(scr, cx, QR_Y + 140, cw, 34, F_BODY, _RED, _WHITE, AP_PASSWORD)
-            self._box(scr, cx, QR_Y + 196, cw, 40, F_HEAD, _BLACK, _WHITE, "2. Open")
-            self._box(scr, cx, QR_Y + 240, cw, 34, F_BODY, _RED, _WHITE, "http://" + self.ip)
+            cx = QR_X + qr_px + 24 if qr_px else 60
+            cw = 960 - 24 - cx
+            url = PAGE_URL.split("://", 1)[-1].rstrip("/")
+            self._box(scr, cx, QR_Y, cw, 40, F_HEAD, _BLACK, _WHITE, "1. Open in Bluefy")
+            self._box(scr, cx, QR_Y + 44, cw, 28, F_SMALL, _RED, _WHITE, url)
+            self._box(scr, cx, QR_Y + 96, cw, 40, F_HEAD, _BLACK, _WHITE, "2. Tap Connect, pick")
+            self._box(scr, cx, QR_Y + 140, cw, 34, F_BODY, _RED, _WHITE, self._adv_name)
+            self._box(scr, cx, QR_Y + 196, cw, 40, F_HEAD, _BLACK, _WHITE, "3. Enter code")
+            self._box(scr, cx, QR_Y + 240, cw, 60, F_TITLE, _RED, _WHITE, self._code)
         else:
+            cx, cw = 60, 960 - 24 - 60
             _frame(fb, cx, QR_Y, cw, 240)
             msg = {
-                "No config": "No AP password\nin the config",
-                "Failed": "WiFi failed\n\nPress Left Btn\nto retry",
-            }.get(self.status, "WiFi is off\n\nPress Left Btn\nto turn it on")
+                "Failed": "Bluetooth failed\n\nPress Left Btn\nto retry",
+            }.get(self.status, "Bluetooth is off\n\nPress Left Btn\nto turn it on")
             self._box(scr, cx + 10, QR_Y + 20, cw - 20, 200, F_BODY, _BLACK, _WHITE, msg)
         self._box(scr, cx, 560, cw, 60, F_SMALL, _BLACK, _WHITE,
-                  "Left Btn: WiFi on / off\nRight Btn: clear the screen")
+                  "Left Btn: Bluetooth on / off\nRight Btn: clear the screen, new code")
 
     def _redraw(self):
         """Clear the panel, draw the current content, refresh."""
@@ -535,24 +555,32 @@ class WebNametagApp(BaseApp):
         # this app is selected, so a name or photo submitted while away is drawn on re-entry.
         self._last_run_ms = time.ticks_ms()
         if self.launched:
-            if self.status in ("WiFi off", "Failed", "No config"):
-                self._wifi_enable()
+            if self.status != "Ready":  # first launch, or retry after "Failed"/"BLE off"
+                self._ble_enable()
             self._need_full = True  # draw below, once the panel is idle
             self._led_state = None  # the launcher blanked the LEDs; re-apply ours
             return
 
         if UserA.pressed():
             if self.status == "Ready":
-                self._wifi_disable()
+                self._ble_disable()
             else:  # off, or failed: (re)start
-                self._wifi_disable()
-                self._wifi_enable()
+                self._ble_disable()
+                self._ble_enable()
         if UserB.pressed() and not self._busy():  # ignore presses while already working
             self.mode = "home"
             self.name_text = ""
             self._photo = None
             self._need_full = True
+            if self.status == "Ready":
+                self._new_code()  # a fresh code; an already-paired phone stays connected
 
+        # A phone that vanished mid-upload must not wedge the badge in "busy".
+        if self._receiving and time.ticks_diff(time.ticks_ms(), self._rx_ms) > RX_TIMEOUT_MS:
+            print("webnametag: photo upload timed out")
+            self._abort_rx()
+
+        self._refresh_status()
         self._update_leds()
 
         # epd.run() clears its "update requested" flag when a refresh finishes, so a

@@ -33,7 +33,7 @@ See "Open questions" at the bottom before relying on any [inferred] item.
 | `tools/` | Host-side scripts, **not synced to the badge**. `sync.py` pushes this dir to the badge (see below). |
 | `data/` | Assets and state: `gallery/` (44 PNGs), `graphics/` (10 PNGs), `schedule.csv`, `rendered_luts.py` (EPD waveform tables), `panel_config.json`, `user_apps.py`, `app_list`. |
 
-Built-in apps, in menu order: Gallery (`gallery.py`), Nametag (`nametag.py`), Workshops / Sat Talks / Sun Talks (all from `schedule.py`), Web Nametag (`webnametag.py`, last because it sorts last; it hosts its own WiFi access point with a page to set a name or photo). Default (index 0) is Gallery.
+Built-in apps, in menu order: Gallery (`gallery.py`), Nametag (`nametag.py`), Workshops / Sat Talks / Sun Talks (all from `schedule.py`), Web Nametag (`webnametag.py`, last because it sorts last; set from a web page over Bluetooth LE). Default (index 0) is Gallery.
 
 ## How apps work [code]
 
@@ -66,15 +66,22 @@ Creates, updates and deletes files on the badge so it matches this directory. Co
 - Listing the badge uses `mpremote exec`, which interrupts `main.py`'s tasks without resetting (boot counter is not bumped). Reset afterwards.
 - Writing to the badge still needs the owner's OK (see working rules): run the dry run, show the plan, then `--apply`.
 - Status: written and syntax-checked, **not yet run against the badge**.
-- `tools/preview.py [port]` serves `data/webnametag/` locally (default 8080) with a mock badge backend, for browser/mobile styling checks. Host-side only; never synced.
+- `tools/preview.py [port]` serves `web/webnametag/` locally (default 8080) with a mock BLE badge, for browser/mobile styling checks. Host-side only; never synced.
 - The tool is one-way. To pull the badge's state into this dir, use `mpremote fs cp -r : dump/` as before.
 
 Tooling lives in `~/.local/bin` (`mpremote`, `esptool`, `espefuse`, `espsecure`, `pyserial-miniterm`; installed with `uv tool`).
 The serial port is exclusive: only one program can hold `/dev/cu.usbmodem1101` at a time (a running `mpremote fs cp` blocks everything else).
 
-## Web Nametag app (`apps/webnametag.py`) [code, untested on hardware]
+## Web Nametag app (`apps/webnametag.py`) [code; protocol tested on host with mocks, **not yet on hardware**]
 
-Hosts its own SoftAP (no existing network needed). Settings: `AP_SSID`/`AP_PASSWORD`/`AP_CHANNEL` (password 8+ chars or the app shows "No config") in `data/webnametag_config.py` (the old `SSID`/`PASSWORD`/`HOSTNAME` are ignored). Home screen shows the WiFi-join QR, credentials and `http://192.168.4.1`. The page is now static files `data/webnametag/index.html` + `app.js` streamed from flash (was an ~18 KB Python string built in RAM per request). The HEIC-converter CDN fallback was removed because the AP has no internet (Safari decodes HEIC itself; other browsers will say "Could not read that image"). Uploaded photos are still received into a RAM buffer (80 KB, 160 KB with red) before being copied to the framebuffers; receiving straight into the framebuffers would save that but the panel may be mid-refresh.
+Bluetooth LE only (no WiFi). A web page hosted on **GitHub Pages** (`web/webnametag/`, deployed by `.github/workflows/pages.yml` on push to master; URL `https://frillweeman.github.io/supercon-2026-badge/`) talks to the badge via **Web Bluetooth**, which needs HTTPS and a supporting browser (Bluefy on iPhone; Safari/iOS has none; Chrome on Android/desktop works). `web/webnametag/bt-test.html` just prints whether `navigator.bluetooth` exists.
+- **Identity:** advertises as `Badge-<BLE_NAME>` (`BLE_NAME` in untracked `data/webnametag_config.py`, see the `.example.py`), or `Badge-<last 2 MAC bytes>` if unset. The page's chooser lists devices by that name.
+- **Pairing code:** random 4 digits, shown on the home screen, regenerated on BLE enable and on the right button. The page sends it first (`A`+code); everything else is refused until then; 3 wrong codes disconnect + 10 s lockout. A nuisance filter, not real security. The page remembers the code per badge name in `localStorage`.
+- **Home screen:** QR + text of the page URL, the advertised name, the code. (An iPhone camera opens Safari, so open the link in Bluefy.)
+- **GATT:** service `7b1f0001-5c0e-4b6e-9a3d-5e11c0de0001`; CTRL `...0002` (commands `A`,`N`,`P`,`S`,`E`), DATA `...0003` (photo bytes, gatts buffer in append mode), STATUS `...0004` (read+notify). Details in the module docstring; `web/webnametag/app.js` mirrors them. Photos go in windows of <=3840 bytes, each followed by `S` which the badge acks with its byte count (the 4096-byte DATA buffer can't overflow), then `E`.
+- **Untested/assumed:** `gatts_set_buffer(..., append=True)` behaviour on this firmware, MTU negotiation under Bluefy (page uses the `chunk` size the badge reports, `mtu-3` capped at 244), real throughput, and RAM headroom with BLE active.
+- `tools/preview.py` serves the page locally with `tools/mock_ble.js` (a fake `navigator.bluetooth`, code 1234) for UI work in desktop Chrome.
+- Old WiFi/SoftAP version: git history (`ef208c9`).
 
 ## Gotchas and oddities noticed [code]
 

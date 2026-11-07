@@ -80,7 +80,11 @@ color:var(--bg);padding:10px 16px;border-radius:999px;font-size:14px;opacity:0;p
 z-index:8;max-width:90%;text-align:center}
 #toast.on{opacity:1}
 </style></head><body><main>
-<header><i id=dot></i><div><h1>Supercon Badge</h1><p id=hp></p></div></header>
+<header><i id=dot></i><div><h1>Supercon Badge</h1><p>Bluetooth</p></div></header>
+<section id=bsec><h2>Badge</h2><p class='cur e' id=bn>Not connected</p>
+<form id=cf class=row style='margin-top:12px'><button id=cb type=button>Connect</button></form>
+<form id=af class=row style='display:none;margin-top:12px'><input id=ci type=text inputmode=numeric pattern='[0-9]*' maxlength=4 placeholder='Code on the badge' autocomplete=off aria-label='Pairing code'><button id=ab>Unlock</button></form>
+<p class=hint id=ch style='margin-top:10px'></p></section>
 <section><h2>On the badge</h2><p class=cur id=cur></p>
 <p class=sub id=sub aria-live=polite><i class=sp></i><span id=sm></span></p></section>
 <section><h2>Name</h2>

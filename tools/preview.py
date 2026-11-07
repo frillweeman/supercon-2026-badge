@@ -1,4 +1,5 @@
-"""Local preview of the apps/webnametag.py web page with a mock badge backend.
+"""Local preview of the web/webnametag page with a mock BLE badge (fake navigator.bluetooth, pairing code 1234).
+Desktop Chrome only; real Bluetooth needs the HTTPS-hosted page.
 Host-side only (tools/ is not synced to the badge). Usage: tools/preview.py [port]
 
 The mock mimics the badge: a submission keeps it "busy" for BUSY_S seconds, during which
@@ -8,7 +9,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-WEB = Path(__file__).resolve().parent.parent / "data" / "webnametag"
+WEB = Path(__file__).resolve().parent.parent / "web" / "webnametag"
 PHOTO_H = 672
 BUSY_S = 8
 state = {"name": "Ada Lovelace", "mode": "name", "busy_until": 0.0}
@@ -23,10 +24,13 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/status"):
             return self.reply(200, json.dumps({"busy": int(busy()), "mode": state["mode"], "name": state["name"]}).encode(), "application/json")
-        name = {"/": "index.html", "/app.js": "app.js"}.get(self.path.split("?")[0])
+        name = {"/": "index.html", "/app.js": "app.js", "/mock_ble.js": "../../tools/mock_ble.js"}.get(self.path.split("?")[0])
         if not name:
             return self.reply(404, b"Not found")
-        self.reply(200, (WEB / name).read_bytes(), "text/html" if name.endswith(".html") else "application/javascript")
+        body = (WEB / name).read_bytes()
+        if name == "index.html":  # inject the mock before app.js runs
+            body = body.replace(b"<script src=/app.js>", b"<script src=/mock_ble.js></script><script src=/app.js>")
+        self.reply(200, body, "text/html" if name.endswith(".html") else "application/javascript")
     def do_POST(self):
         n = int(self.headers["Content-Length"]); body = b""
         while len(body) < n:  # slow read so upload progress is visible
