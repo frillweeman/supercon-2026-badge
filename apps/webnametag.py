@@ -301,11 +301,13 @@ class WebNametagApp(BaseApp):
     def _irq(self, event, data):
         try:
             if event == _IRQ_CONNECT:
+                print("webnametag: connect")
                 self._conn = data[0]
                 self._authed = False
                 self._bad = 0
                 self._stat_key = None
             elif event == _IRQ_DISCONNECT:
+                print("webnametag: disconnect (rx %d/%d)" % (self._got, self._total))
                 self._conn = None
                 self._authed = False
                 self._mtu = 23
@@ -314,6 +316,7 @@ class WebNametagApp(BaseApp):
                 if self.status == "Ready":
                     self._advertise()
             elif event == _IRQ_MTU:
+                print("webnametag: mtu", data[1])
                 self._mtu = data[1]
                 self._stat_key = None
             elif event == _IRQ_WRITE:
@@ -331,6 +334,7 @@ class WebNametagApp(BaseApp):
 
     def _on_ctrl(self, msg):
         op = msg[:1]
+        print("webnametag: ctrl", op, len(msg), "authed" if self._authed else "locked-out" if self._locked() else "unauthed")
         if op == b"A":
             if self._locked():
                 return self._publish(EV_LOCKED)
@@ -378,6 +382,7 @@ class WebNametagApp(BaseApp):
             self._receiving = True
             return self._publish(EV_PH_READY)
         if op == b"S":
+            print("webnametag: ack", self._got)
             return self._publish(EV_ACK, self._got)
         if op == b"E":
             ok = self._receiving and self._got == self._total

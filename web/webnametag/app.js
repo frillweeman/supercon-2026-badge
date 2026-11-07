@@ -72,7 +72,7 @@ var bsec=$('bsec'),bn=$('bn'),cb=$('cb'),af=$('af'),ci=$('ci'),ch=$('ch');
 function gate(on){authed=on;[].forEach.call(document.querySelectorAll('main > section:not(#bsec)'),function(e){
  e.style.opacity=on?'':'.4';if(on)e.removeAttribute('inert');else e.setAttribute('inert','');});}
 function bst(t,cls){bn.textContent=t;bn.className='cur'+(cls?' '+cls:'');}
-function lost(){wt.forEach(function(w){clearTimeout(w.t);});wt=[];gate(false);af.style.display='none';cb.style.display='';
+function lost(){console.log('badge link lost');wt.forEach(function(w){clearTimeout(w.t);});wt=[];gate(false);af.style.display='none';cb.style.display='';
  cb.textContent='Connect';cb.disabled=false;bst('Not connected','e');}
 function ckey(){return'code:'+(dev&&dev.name||'');}
 function unlock(code){var w=wev([EV.AUTH_OK,EV.AUTH_BAD,EV.LOCKED],6000);
@@ -102,7 +102,7 @@ function sendName(v){sn.disabled=cl.disabled=true;sn.textContent='Sending...';
  rp('name',v,null,function(t){sn.textContent=t;})
  .then(function(a){if(a[0]==200){curName=a[1];curMode='name';ni.value='';ni.blur();toast(a[1]?'Name sent.':'Name cleared.');watch();}
   else alertBox(a[1]);})
- .catch(function(){alertBox('Could not reach the badge.');})
+ .catch(function(e){alertBox('Could not reach the badge'+(e&&e.name?' ('+e.name+': '+(e.message||'')+')':'.'));})
  .then(function(){sn.textContent='Set';show();});}
 $('nf').onsubmit=function(ev){ev.preventDefault();if(!sn.disabled)sendName(ni.value);};
 cl.onclick=function(){sendName('');};
@@ -180,7 +180,7 @@ ss.onclick=function(){if(busy||!img)return;if(tab=='c'){tabTo('p');return;}lock(
    function(t){ss.textContent=t;prog(-1);})
   .then(function(a){if(a[0]==200){reset();curMode='photo';show();toast('Sent! The panel takes a while to refresh.');watch();}
    else alertBox(a[1]);})
-  .catch(function(){alertBox('Could not reach the badge.');})
+  .catch(function(e){alertBox('Could not reach the badge'+(e&&e.name?' ('+e.name+': '+(e.message||'')+')':'.'));})
   .then(function(){lock(false);});},40);};
 /* Escape closes the topmost layer; Tab stays inside it. */
 document.onkeydown=function(e){var ovo=$('ov').style.display=='flex';
