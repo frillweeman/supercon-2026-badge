@@ -45,8 +45,8 @@ from apps.base_app import BaseApp
 from lib.button import UserA, UserB
 from lib.led_bar import NUM_LEDS, leds
 
-# Reuse webnametag's LED chase sequence (module import only; nothing is drawn).
-from apps import webnametag as _wn
+# Reuse the BLE photo apps' LED chase sequence (module import only; nothing is drawn).
+from lib import ble_photo as _wn
 
 SVC_UUID = bluetooth.UUID("9f1c0001-4b1d-4e6f-8a52-4b6579524d31")
 BTN_UUID = bluetooth.UUID("9f1c0002-4b1d-4e6f-8a52-4b6579524d31")
