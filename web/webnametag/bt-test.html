@@ -1,0 +1,9 @@
+<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>BT test</title>
+<body style="font:20px system-ui;padding:24px">
+<p>secure context: <b id=a></b></p>
+<p>navigator.bluetooth: <b id=b></b></p>
+<script>
+a.textContent=String(window.isSecureContext);
+b.textContent=String(!!navigator.bluetooth);
+</script>
