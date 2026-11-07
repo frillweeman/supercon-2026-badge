@@ -399,6 +399,8 @@ class WebNametagApp(BaseApp):
         if not (self._authed and self._receiving and self._buf is not None):
             return
         n = len(d)
+        if self._got == 0:
+            print("webnametag: first data", n)
         if self._got + n > self._total:
             self._abort_rx()
             return self._publish(EV_PH_ERR)

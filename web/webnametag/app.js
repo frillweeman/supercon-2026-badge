@@ -49,8 +49,8 @@ function onst(e){var t=parse(e.target.value),i;if(t.chunk)chunk=Math.min(t.chunk
 /* Register BEFORE writing: the notification can beat the write's own completion. */
 function wev(set,ms){return new Promise(function(ok,no){var w={set:set,ok:ok};
  w.t=setTimeout(function(){wt.splice(wt.indexOf(w),1);dbg('timeout waiting for event',set);no(new Error('timeout'));},ms||8000);wt.push(w);});}
-/* DATA writes: no-response is fast, but if this browser rejects or stalls on it we fall back to acknowledged writes. */
-var nr=true;
+/* DATA writes are acknowledged by default (one event per write on the badge, no burst). */
+var nr=/[?&]nr=1/.test(location.search); /* fast no-response DATA writes are opt-in (?nr=1): a 21-write burst wedged the badge's BLE under Bluefy */
 function dw(a){if(!nr)return chD.writeValueWithResponse(a);
  return chD.writeValueWithoutResponse(a).catch(function(e){dbg('no-response DATA write failed, switching to acknowledged writes:',e);nr=false;return chD.writeValueWithResponse(a);});}
 function ctl(bytes){return chC.writeValueWithResponse(bytes);}
@@ -62,13 +62,13 @@ function tx(kind,body,cb){
    if(t.ev==EV.BUSY)return[503,'Badge is busy updating its display. Wait a few seconds and try again.'];
    if(t.ev==EV.NEED_AUTH)return[401,'Badge is locked. Enter the code again.'];
    return rd().then(function(s){return[200,s.name];});});}
- dbg('photo: start, bytes',body.length,'chunk',chunk,'noResp',nr);var n=body.length,planes=n/(W*H/8),sent=0,win=Math.max(chunk,Math.floor(3840/chunk)*chunk),w1=wev([EV.PH_READY,EV.BUSY,EV.NEED_AUTH]);
+ dbg('photo: start, bytes',body.length,'chunk',chunk,'noResp',nr);var t1=Date.now();var n=body.length,planes=n/(W*H/8),sent=0,win=Math.max(chunk,Math.floor(3840/chunk)*chunk),w1=wev([EV.PH_READY,EV.BUSY,EV.NEED_AUTH]);
  return cmd('P',new Uint8Array([planes])).then(function(){return w1;}).then(function(t){
   if(t.ev==EV.BUSY)return[503,'Badge is busy updating its display. Wait a few seconds and try again.'];
   if(t.ev==EV.NEED_AUTH)return[401,'Badge is locked. Enter the code again.'];
   function win1(){if(sent>=n){var w3=wev([EV.PH_OK,EV.PH_ERR],15000);
     return cmd('E').then(function(){return w3;}).then(function(e){
-     return e.ev==EV.PH_OK?[200,'ok']:[500,'The badge could not use that image. Try again.'];});}
+     dbg('photo: finished in',((Date.now()-t1)/1000).toFixed(1),'s, ev',e.ev);return e.ev==EV.PH_OK?[200,'ok']:[500,'The badge could not use that image. Try again.'];});}
    var end=Math.min(n,sent+win),chain=Promise.resolve(),o;dbg('photo: window',sent,'->',end);
    for(o=sent;o<end;o+=chunk)(function(o){chain=chain.then(function(){
      return dw(body.subarray(o,Math.min(end,o+chunk)));});})(o);
