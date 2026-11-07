@@ -1,3 +1,4 @@
 # Local WiFi credentials/settings for apps/webnametag.py (template is tracked as *.example.py)
 data/webnametag_config.py
 __pycache__/
+.DS_Store
