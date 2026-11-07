@@ -16,6 +16,7 @@ Automation permission to control Keynote. Never launches Keynote by itself.
 """
 
 import asyncio
+import re
 import struct
 
 from bleak import BleakClient, BleakScanner
@@ -24,7 +25,8 @@ SVC_UUID = "9f1c0001-4b1d-4e6f-8a52-4b6579524d31"
 BTN_UUID = "9f1c0002-4b1d-4e6f-8a52-4b6579524d31"
 STATE_UUID = "9f1c0003-4b1d-4e6f-8a52-4b6579524d31"
 NAME_UUID = "9f1c0004-4b1d-4e6f-8a52-4b6579524d31"
-NAME_MAX = 20  # bytes; fits one ATT write at the default MTU
+ROOT_UUID = "9f1c0005-4b1d-4e6f-8a52-4b6579524d31"
+NAME_MAX = 20 # bytes; fits one ATT write at the default MTU
 POLL_S = 0.5
 
 STATE_SCRIPT = """
@@ -43,24 +45,62 @@ end if
 return "0,0,0|"
 """
 
+# Keynote's `show next` / `show previous` move whole slides and skip builds. The arrow keys
+# are what a real clicker sends: they step builds first, then slides. So while presenting we
+# press Right/Left (key codes 124/123) via System Events, which needs Accessibility
+# permission for the terminal app and a frontmost Keynote.
+def _key_script(code: int, start_if_idle: bool) -> str:
+    idle = (
+        "tell application \"Keynote\" to if (count of documents) > 0 then start front document"
+        if start_if_idle else "return"
+    )
+    return f"""
+if application "Keynote" is running then
+  tell application "Keynote"
+    set isPlaying to playing
+  end tell
+  if isPlaying then
+    tell application "System Events"
+      if not (frontmost of process "Keynote") then set frontmost of process "Keynote" to true
+      key code {code}
+    end tell
+  else
+    {idle}
+  end if
+end if"""
+
+
+NOTES_SCRIPT = """
+if application "Keynote" is running then
+  tell application "Keynote"
+    try
+      if playing then return (presenter notes of current slide of front document) as text
+    end try
+  end tell
+end if
+return ""
+"""
+
+ROOT_RE = re.compile(r"\broot\s*:\s*(\d+)", re.IGNORECASE)
+
+
+def parse_root(notes: str) -> int | None:
+    """Value of an optional `root:N` field in a slide's presenter notes (0-49 = SAO animation,
+    50 = all off), or None if the slide has no valid field. `pic:` is reserved for later."""
+    m = ROOT_RE.search(notes)
+    if m and int(m.group(1)) <= 50:
+        return int(m.group(1))
+    return None
+
+
 CMD_SCRIPTS = {
-    b"N": """
-if application "Keynote" is running then
-  tell application "Keynote"
-    if playing then
-      show next
-    else if (count of documents) > 0 then
-      start front document
-    end if
-  end tell
-end if""",
-    b"P": """
-if application "Keynote" is running then
-  tell application "Keynote"
-    if playing then show previous
-  end tell
-end if""",
+    b"N": _key_script(124, True),  # not presenting: start the show instead of stepping
+    b"P": _key_script(123, False),
+    # Custom commands from the badge: b"1" = B1, b"2" = B2.
+    b"1": 'do shell script "open https://cornhub.website"',
+    b"2": 'do shell script "open https://willsploit.com"',
 }
+CMD_NAMES = {b"N": "next", b"P": "prev", b"1": "B1 (cornhub)", b"2": "B2 (web)"}
 
 
 async def osa(script: str) -> str:
@@ -102,7 +142,7 @@ async def session(device) -> None:
 
     async def run_cmd(cmd: bytes) -> None:
         async with lock:
-            print("badge:", "next" if cmd == b"N" else "prev")
+            print("badge:", CMD_NAMES[cmd])
             await osa(CMD_SCRIPTS[cmd])
         state_changed.set()  # push the new slide right away instead of waiting for the poll
 
@@ -110,8 +150,17 @@ async def session(device) -> None:
         print("connected to", device.name or device.address)
         await client.start_notify(BTN_UUID, on_button)
         last = last_name = None
+        last_slide = None  # slide whose notes we last read; None whenever not presenting
         while client.is_connected:
             state, name = await read_state()
+            slide = state[1] if state[0] else None
+            if slide != last_slide:
+                last_slide = slide
+                if slide is not None:
+                    root = parse_root(await osa(NOTES_SCRIPT))
+                    if root is not None:  # no field on this slide: leave the lights alone
+                        print("slide", slide, "root:", root)
+                        await client.write_gatt_char(ROOT_UUID, bytes((root,)), response=False)
             if name != last_name:  # name first so the badge never shows a stale deck
                 await client.write_gatt_char(NAME_UUID, name or b"\0", response=False)
                 last_name = name
