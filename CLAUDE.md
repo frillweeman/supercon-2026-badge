@@ -33,7 +33,7 @@ See "Open questions" at the bottom before relying on any [inferred] item.
 | `tools/` | Host-side scripts, **not synced to the badge**. `sync.py` pushes this dir to the badge (see below). |
 | `data/` | Assets and state: `gallery/` (44 PNGs), `graphics/` (10 PNGs), `schedule.csv`, `rendered_luts.py` (EPD waveform tables), `panel_config.json`, `user_apps.py`, `app_list`. |
 
-Built-in apps, in menu order: Gallery (`gallery.py`), Nametag (`nametag.py`), Workshops / Sat Talks / Sun Talks (all from `schedule.py`), Web Nametag (`webnametag.py`), WiFi Nametag (`wifinametag.py`, last because it sorts last; set from a web page over Bluetooth LE). Default (index 0) is Gallery.
+**Enabled apps, in menu order:** Keynote Remote (`keynote.py`), Web Nametag (`webnametag.py`), WiFi Nametag (`wifinametag.py`; hosts its own WiFi access point). **Disabled** by renaming with a leading underscore, which the launcher skips: `_gallery.py` (Gallery), `_nametag.py` (Nametag), `_schedule.py` (Workshops / Sat Talks / Sun Talks). To re-enable one, `git mv` it back without the `_` and sync. Default (index 0) is now the first app alphabetically, Keynote Remote.
 
 ## How apps work [code]
 
