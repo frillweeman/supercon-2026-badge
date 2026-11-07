@@ -33,12 +33,16 @@ var SVC='7b1f0001-5c0e-4b6e-9a3d-5e11c0de0001',U_CT='7b1f0002-5c0e-4b6e-9a3d-5e1
  dev,chC,chD,chS,chunk=20,wt=[],authed=false,MODES=['home','name','photo'];
 function parse(v){return{authed:v.getUint8(0),busy:v.getUint8(1),mode:MODES[v.getUint8(2)]||'home',ev:v.getUint8(3),
  chunk:v.getUint16(4),arg:v.getUint32(6),name:v.byteLength>10?new TextDecoder().decode(new DataView(v.buffer,v.byteOffset+10)):''};}
-function rd(){return chS.readValue().then(function(v){var t=parse(v);if(t.chunk)chunk=t.chunk;return t;});}
-function onst(e){var t=parse(e.target.value),i;if(t.chunk)chunk=t.chunk;if(!t.ev)return;
+function rd(){return chS.readValue().then(function(v){var t=parse(v);if(t.chunk)chunk=Math.min(t.chunk,180);return t;});}
+function onst(e){var t=parse(e.target.value),i;if(t.chunk)chunk=Math.min(t.chunk,180);if(!t.ev)return;
  for(i=0;i<wt.length;i++)if(wt[i].set.indexOf(t.ev)>=0){var w=wt.splice(i,1)[0];clearTimeout(w.t);w.ok(t);return;}}
 /* Register BEFORE writing: the notification can beat the write's own completion. */
 function wev(set,ms){return new Promise(function(ok,no){var w={set:set,ok:ok};
  w.t=setTimeout(function(){wt.splice(wt.indexOf(w),1);no(new Error('timeout'));},ms||8000);wt.push(w);});}
+/* DATA writes: no-response is fast, but if this browser rejects or stalls on it we fall back to acknowledged writes. */
+var nr=true;
+function dw(a){if(!nr)return chD.writeValueWithResponse(a);
+ return chD.writeValueWithoutResponse(a).catch(function(e){console.log('no-response write failed, using acknowledged writes',e);nr=false;return chD.writeValueWithResponse(a);});}
 function ctl(bytes){return chC.writeValueWithResponse(bytes);}
 function cmd(op,body){var a=new Uint8Array(1+(body?body.length:0));a[0]=op.charCodeAt(0);if(body)a.set(body,1);return ctl(a);}
 /* Resolves to [status,text] like the old HTTP calls: 200 ok, 503 badge busy, other = error text. */
@@ -57,14 +61,15 @@ function tx(kind,body,cb){
      return e.ev==EV.PH_OK?[200,'ok']:[500,'The badge could not use that image. Try again.'];});}
    var end=Math.min(n,sent+win),chain=Promise.resolve(),o;
    for(o=sent;o<end;o+=chunk)(function(o){chain=chain.then(function(){
-     return chD.writeValueWithoutResponse(body.subarray(o,Math.min(end,o+chunk)));});})(o);
+     return dw(body.subarray(o,Math.min(end,o+chunk)));});})(o);
    var w2=wev([EV.ACK,EV.NEED_AUTH],8000);
    return chain.then(function(){return cmd('S');}).then(function(){return w2;}).then(function(a){
     if(a.ev!=EV.ACK||a.arg!=end)return[500,'Transfer got out of sync. Try again.'];
     sent=end;if(cb)cb(sent/n);return win1();});}
   return win1();});}
 /* The badge answers busy while it is still deploying the last submission: wait 5 s and try once more. */
-function rp(kind,body,cb,lb){return tx(kind,body,cb).then(function(a){if(a[0]!=503)return a;
+function rp(kind,body,cb,lb){return tx(kind,body,cb).catch(function(e){
+ if(kind=='photo'&&nr&&e&&e.message=='timeout'){nr=false;lb('Retrying more slowly...');return tx(kind,body,cb);}throw e;}).then(function(a){if(a[0]!=503)return a;
  return new Promise(function(ok){var n=5;(function t(){if(n<1)return ok();lb('Badge is busy, retrying in '+n+'s');n--;setTimeout(t,1000);})();})
  .then(function(){lb('Sending...');return tx(kind,body,cb);});});}
 /* ---- connect / pairing ---- */

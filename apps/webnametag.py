@@ -364,7 +364,8 @@ class WebNametagApp(BaseApp):
             return self._publish(EV_NAME_OK)
         if op == b"P":
             planes = msg[1] if len(msg) > 1 else 0
-            if self._busy():
+            # A new P while receiving restarts the upload (the page retries after a stall).
+            if self._display_busy() or (not self._receiving and self._busy()):
                 return self._publish(EV_BUSY)
             if planes not in (1, 2):
                 return self._publish(EV_PH_ERR)

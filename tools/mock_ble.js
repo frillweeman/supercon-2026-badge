@@ -14,6 +14,7 @@ var C={writeValueWithResponse:function(a){var op=String.fromCharCode(a[0]),rest=
  if(op=='S')return ev(9,got);
  if(op=='E'){var good=buf&&got==total;buf=null;if(good){st.mode=2;work();}return ev(good?4:5);}});}};
 var D={writeValueWithoutResponse:function(a){if(buf)got+=a.length;return new Promise(function(ok){setTimeout(ok,1);});}};
+D.writeValueWithResponse=D.writeValueWithoutResponse;
 var S={readValue:function(){return Promise.resolve(val(0,0,true));},startNotifications:function(){return Promise.resolve(S);},
  addEventListener:function(n,f){ls.push(f);}};
 var chars={};chars['7b1f0002-5c0e-4b6e-9a3d-5e11c0de0001']=C;chars['7b1f0003-5c0e-4b6e-9a3d-5e11c0de0001']=D;chars['7b1f0004-5c0e-4b6e-9a3d-5e11c0de0001']=S;
