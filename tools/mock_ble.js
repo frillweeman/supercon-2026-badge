@@ -9,6 +9,7 @@ function work(){st.busy=1;setTimeout(function(){st.busy=0;},2000);}
 var C={writeValueWithResponse:function(a){var op=String.fromCharCode(a[0]),rest=a.slice(1);return new Promise(function(ok){setTimeout(ok,10);
  if(op=='A'){if(new TextDecoder().decode(rest)==T){st.authed=1;ev(1);}else{bad++;ev(bad>=3?6:2);}return;}
  if(!st.authed)return ev(10);
+ if(op=='D'){if(buf)got+=rest.length;return;}
  if(op=='N'){if(st.busy)return ev(7);st.name=new TextDecoder().decode(rest);st.mode=st.name?1:0;work();return ev(8);}
  if(op=='P'){if(st.busy)return ev(7);total=rest[0]*80640;got=0;buf=1;return ev(3);}
  if(op=='S')return ev(9,got);

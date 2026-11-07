@@ -13,12 +13,12 @@ wrong codes disconnect and lock out for 10 s. This keeps neighbours from overwri
 it is not strong security.
 
 GATT (one 128-bit service, see UUIDs below; the page, web/webnametag/app.js, mirrors them):
-  CTRL   write           b"A"+code | b"N"+name | b"P"+planes(1|2) | b"S" (sync) | b"E" (end photo)
-  DATA   write no resp   raw photo bytes, appended in order (gatts buffer in append mode)
+  CTRL   write           b"A"+code | b"N"+name | b"P"+planes(1|2) | b"D"+bytes | b"S" (sync) | b"E" (end photo)
+  DATA   (unused; stalled writes under Bluefy. Photo bytes now go in CTRL as b"D"+bytes)
   STATUS read + notify   authed, busy, mode, ev (1 byte each), chunk (u16), arg (u32), then the name.
                          ev != 0 is a one-shot event (see EV_*); arg is the received byte count for EV_ACK.
-A photo is sent as P, then DATA windows of <= 3840 bytes each followed by S (the badge answers with
-EV_ACK and its byte count, so the 4096-byte DATA buffer can never overflow), then E. Body =
+A photo is sent as P, then D windows of <= 3840 bytes each followed by S (the badge answers with
+EV_ACK and its byte count, so the sender never runs far ahead), then E. Body =
 black plane (1 = black), optionally followed by a red plane (1 = red), 960 x 672 at 120 bytes/row,
 MSB first; a pixel is never set in both. The badge copies the planes into the framebuffers; LVGL
 only draws text.
@@ -224,7 +224,7 @@ class WebNametagApp(BaseApp):
                     (_STAT, bluetooth.FLAG_READ | bluetooth.FLAG_NOTIFY),
                 )),
             ))
-            ble.gatts_set_buffer(self._h_ctrl, 64)
+            ble.gatts_set_buffer(self._h_ctrl, 256)  # fits b"D" + a 180-byte photo chunk
             ble.gatts_set_buffer(self._h_data, DATA_BUF, True)  # append: bursts are not lost
             ble.gatts_set_buffer(self._h_stat, 64)
             self._new_code()
@@ -334,6 +334,10 @@ class WebNametagApp(BaseApp):
 
     def _on_ctrl(self, msg):
         op = msg[:1]
+        if op == b"D":  # photo bytes (acknowledged write; the DATA characteristic is unused)
+            if self._authed:
+                self._on_data(memoryview(msg)[1:])
+            return
         print("webnametag: ctrl", op, len(msg), "authed" if self._authed else "locked-out" if self._locked() else "unauthed")
         if op == b"A":
             if self._locked():

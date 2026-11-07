@@ -7,7 +7,7 @@ function dbg(){var m=[].map.call(arguments,function(a){return a&&a.name&&a.messa
 (function(){var o=console.log;console.log=function(){dbg.apply(null,arguments);o.apply(console,arguments);};})();
 window.addEventListener('error',function(e){dbg('JS error:',e.message,e.filename?(e.filename.split('/').pop()+':'+e.lineno):'');});
 window.addEventListener('unhandledrejection',function(e){dbg('Unhandled rejection:',e.reason);});
-var BUILD=4;
+var BUILD=5;
 dbg('page loaded, build',BUILD,navigator.userAgent);
 var W=960,H=672,P=W/2,Q=H/2,img,sc,mn,ox,oy,d=null,tab='c',rc=true,dirty=true,last=null,busy=false,tm,tk,pt,pn=0,opener,fo;
 function $(i){return document.getElementById(i);}
@@ -44,15 +44,15 @@ var SVC='7b1f0001-5c0e-4b6e-9a3d-5e11c0de0001',U_CT='7b1f0002-5c0e-4b6e-9a3d-5e1
  dev,chC,chD,chS,chunk=20,wt=[],authed=false,MODES=['home','name','photo'];
 function parse(v){return{authed:v.getUint8(0),busy:v.getUint8(1),mode:MODES[v.getUint8(2)]||'home',ev:v.getUint8(3),
  chunk:v.getUint16(4),arg:v.getUint32(6),name:v.byteLength>10?new TextDecoder().decode(new DataView(v.buffer,v.byteOffset+10)):''};}
-function rd(){return chS.readValue().then(function(v){var t=parse(v);if(t.chunk)chunk=Math.min(t.chunk,180);return t;});}
-function onst(e){var t=parse(e.target.value),i;if(t.chunk)chunk=Math.min(t.chunk,180);if(!t.ev)return;dbg('badge event',t.ev,'arg',t.arg,'busy',t.busy,'chunk',t.chunk);
+function rd(){return chS.readValue().then(function(v){var t=parse(v);if(t.chunk)chunk=Math.min(t.chunk,CAP);return t;});}
+function onst(e){var t=parse(e.target.value),i;if(t.chunk)chunk=Math.min(t.chunk,CAP);if(!t.ev)return;dbg('badge event',t.ev,'arg',t.arg,'busy',t.busy,'chunk',t.chunk);
  for(i=0;i<wt.length;i++)if(wt[i].set.indexOf(t.ev)>=0){var w=wt.splice(i,1)[0];clearTimeout(w.t);w.ok(t);return;}}
 /* Register BEFORE writing: the notification can beat the write's own completion. */
 function wev(set,ms){return new Promise(function(ok,no){var w={set:set,ok:ok};
  w.t=setTimeout(function(){wt.splice(wt.indexOf(w),1);dbg('timeout waiting for event',set);no(new Error('timeout'));},ms||8000);wt.push(w);});}
 /* DATA writes are acknowledged by default (one event per write on the badge, no burst). */
-var nr=/[?&]nr=1/.test(location.search); /* fast no-response DATA writes are opt-in (?nr=1): a 21-write burst wedged the badge's BLE under Bluefy */
-function dw(a){if(!nr)return chD.writeValueWithResponse(a);
+var nr=/[?&]nr=1/.test(location.search),CAP=+((location.search.match(/[?&]chunk=(\d+)/)||[])[1]||180); /* fast no-response DATA writes are opt-in (?nr=1): a 21-write burst wedged the badge's BLE under Bluefy */
+function dw(a){if(!nr){var b=new Uint8Array(1+a.length);b[0]=68;b.set(a,1);return chC.writeValueWithResponse(b);} /* 'D'+bytes on CTRL */
  return chD.writeValueWithoutResponse(a).catch(function(e){dbg('no-response DATA write failed, switching to acknowledged writes:',e);nr=false;return chD.writeValueWithResponse(a);});}
 function ctl(bytes){return chC.writeValueWithResponse(bytes);}
 function cmd(op,body){dbg('cmd',op,body?body.length:0);var a=new Uint8Array(1+(body?body.length:0));a[0]=op.charCodeAt(0);if(body)a.set(body,1);return ctl(a);}
@@ -63,7 +63,7 @@ function tx(kind,body,cb){
    if(t.ev==EV.BUSY)return[503,'Badge is busy updating its display. Wait a few seconds and try again.'];
    if(t.ev==EV.NEED_AUTH)return[401,'Badge is locked. Enter the code again.'];
    return rd().then(function(s){return[200,s.name];});});}
- dbg('photo: start, bytes',body.length,'chunk',chunk,'noResp',nr);var t1=Date.now();var n=body.length,planes=n/(W*H/8),sent=0,win=Math.max(chunk,Math.floor(3840/chunk)*chunk),w1=wev([EV.PH_READY,EV.BUSY,EV.NEED_AUTH]);
+ dbg('photo: start, bytes',body.length,'chunk',chunk,'noResp',nr,'cap',CAP);var t1=Date.now();var n=body.length,planes=n/(W*H/8),sent=0,win=Math.max(chunk,Math.floor(3840/chunk)*chunk),w1=wev([EV.PH_READY,EV.BUSY,EV.NEED_AUTH]);
  return cmd('P',new Uint8Array([planes])).then(function(){return w1;}).then(function(t){
   if(t.ev==EV.BUSY)return[503,'Badge is busy updating its display. Wait a few seconds and try again.'];
   if(t.ev==EV.NEED_AUTH)return[401,'Badge is locked. Enter the code again.'];
