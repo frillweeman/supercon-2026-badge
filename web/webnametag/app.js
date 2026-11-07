@@ -7,7 +7,8 @@ function dbg(){var m=[].map.call(arguments,function(a){return a&&a.name&&a.messa
 (function(){var o=console.log;console.log=function(){dbg.apply(null,arguments);o.apply(console,arguments);};})();
 window.addEventListener('error',function(e){dbg('JS error:',e.message,e.filename?(e.filename.split('/').pop()+':'+e.lineno):'');});
 window.addEventListener('unhandledrejection',function(e){dbg('Unhandled rejection:',e.reason);});
-dbg('page loaded',navigator.userAgent);
+var BUILD=4;
+dbg('page loaded, build',BUILD,navigator.userAgent);
 var W=960,H=672,P=W/2,Q=H/2,img,sc,mn,ox,oy,d=null,tab='c',rc=true,dirty=true,last=null,busy=false,tm,tk,pt,pn=0,opener,fo;
 function $(i){return document.getElementById(i);}
 var f=$('f'),fc=$('fc'),c=$('c'),x=c.getContext('2d'),pv=$('pv'),pvx=pv.getContext('2d'),z=$('z'),rs=$('rs'),
