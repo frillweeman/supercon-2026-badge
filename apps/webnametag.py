@@ -156,7 +156,7 @@ def _ascii(raw):
 
 
 def _uuid_le(u):
-    return bytes.fromhex(u.replace("-", ""))[::-1]
+    return bytes(reversed(bytes.fromhex(u.replace("-", ""))))  # MicroPython has no [::-1] on bytes
 
 
 class WebNametagApp(BaseApp):
