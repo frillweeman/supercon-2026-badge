@@ -6,6 +6,8 @@ The badge is the source of truth. This repo is a snapshot you edit and copy back
 
 See `CLAUDE.md` for the detailed hardware pin map, how the launcher works, known oddities and open questions.
 
+Apps worth a look: **Keynote Remote**, a BLE slide clicker for Keynote on a Mac. See `KEYNOTE_REMOTE.md`.
+
 ## Prerequisites (macOS)
 
 ```sh

@@ -103,6 +103,13 @@ class AppSwitcher:
                 if MenuMinus.pressed() or MenuPlus.pressed():
                     self.selection_idx = self.active_idx
                     self.selecting_mode = True
+                    # Optional hook so apps can release radios etc. when leaving.
+                    on_exit = getattr(self.apps[self.active_idx], "on_exit", None)
+                    if on_exit:
+                        try:
+                            on_exit()
+                        except Exception as exc:
+                            sys.print_exception(exc)
                     ## Reset pressed state so that button doesn't advance menu, just enters menu state
                     MenuMinus._pressed_state = PRESSED_READ
                     MenuPlus._pressed_state = PRESSED_READ
