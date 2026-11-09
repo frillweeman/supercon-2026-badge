@@ -1,0 +1,31 @@
+<!DOCTYPE html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1,viewport-fit=cover'>
+<meta name=color-scheme content='light dark'><title>Badge Boarding Pass</title><link rel=icon href=data:,>
+<link rel=stylesheet href=style.css?v=6></head><body><main>
+<header><i id=dot></i><div><h1>Badge Boarding Pass</h1><p>Boarding pass on the badge &middot; <a href=./ style='color:inherit'>Nametag</a> &middot; <a href=codes.html style='color:inherit'>Codes</a></p></div></header>
+<section id=bsec><h2>Badge</h2><p class='cur e' id=bn>Not connected</p>
+<form class=row style='margin-top:12px'><button id=cb type=button>Connect</button></form>
+<p class=hint id=ch style='margin-top:10px'></p></section>
+<section><h2>Your pass</h2>
+<div class=pk><input class=v type=file id=pf accept='image/*'><label for=pf><svg viewBox='0 0 24 24'><rect x=3 y=5 width=18 height=14 rx=2></rect><circle cx=9 cy=11 r=2></circle><path d='M21 16l-5-5-8 8'></path></svg>Choose a screenshot or photo of the pass</label></div>
+<p class=hint style='margin-top:10px'>Any image that shows the pass's barcode (the PDF417 or Aztec code). It is read on this device; nothing is uploaded.</p>
+<details style='margin-top:12px'><summary class=hint>Or paste the barcode text</summary>
+<textarea id=raw rows=3 spellcheck=false autocapitalize=off style='width:100%;margin-top:8px;font:13px/1.3 ui-monospace,Menlo,monospace;color:var(--fg);background:var(--bg);border:1px solid var(--ln);border-radius:10px;padding:10px'></textarea></details>
+<p id=pm role=status style='font-size:14px;margin:12px 0 0;min-height:20px;color:var(--mut)'></p>
+<div id=lgw style='display:none'><label class=f for=lg>Flight</label><select id=lg></select></div></section>
+<section><h2>Details</h2>
+<p class=hint style='margin:0 0 4px'>Read from the barcode. It does not contain the boarding zone, gate or time, so type those from your pass if you want them shown.</p>
+<div class=row style='margin-top:10px'><div style='flex:1;min-width:0'><label class=f for=zn>Zone</label><input id=zn type=text maxlength=8 autocomplete=off autocapitalize=characters></div>
+<div style='flex:1;min-width:0'><label class=f for=gt>Gate</label><input id=gt type=text maxlength=6 autocomplete=off autocapitalize=characters></div>
+<div style='flex:1;min-width:0'><label class=f for=bd>Boards</label><input id=bd type=text maxlength=10 autocomplete=off placeholder='10:25 AM'></div></div>
+<label class=f for=bt>Barcode style</label><select id=bt><option value=pdf417>PDF417 (paper pass)</option><option value=azteccode>Aztec (mobile pass)</option></select></section>
+<section data-gate><h2>Preview (what the badge shows)</h2><canvas id=cv width=960 height=672></canvas>
+<p id=msg role=status></p><button id=go type=button style='width:100%;margin-top:12px'>Send to badge</button>
+<p class=hint>The panel takes several seconds to refresh. This is a picture for display only: e-paper barcodes are unreliable to scan, so keep your real pass.</p></section>
+<section id=dbs><details><summary class=hint>Debug log</summary>
+<pre id=dbg style='font:12px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all;max-height:45vh;overflow:auto;user-select:text;-webkit-user-select:text;margin:10px 0'></pre>
+<button type=button id=dbc class=g>Copy log</button></details></section></main>
+<div id=ov><div role=alertdialog aria-modal=true><p id=ovt></p><button id=ovb>OK</button></div></div>
+<div id=toast role=status></div>
+<script src=bwip.js></script><script src=bcbp.js></script><script src=passdraw.js></script><script src=zxing-reader.js></script>
+<script src=ble.js?v=6></script><script src=pass.js?v=1></script></body></html>
